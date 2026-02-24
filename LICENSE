@@ -1,0 +1,59 @@
+MIT License
+
+Copyright (c) 2026 PlantVillage Detection Project Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+THIRD-PARTY SOFTWARE NOTICES
+
+This project uses the following third-party software:
+
+1. Ultralytics YOLO (AGPL-3.0)
+   - License: https://github.com/ultralytics/ultralytics/blob/main/LICENSE
+   - Note: If you use this commercially, you must comply with AGPL-3.0 
+     (open-source your modifications or purchase Enterprise license)
+
+2. PyTorch (BSD 3-Clause)
+   - License: https://github.com/pytorch/pytorch/blob/main/LICENSE
+
+3. CoreMLTools (BSD 3-Clause)
+   - License: https://github.com/apple/coremltools/blob/main/LICENSE
+
+---
+
+DATASET LICENSES
+
+1. PlantVillage Dataset (CC BY 4.0)
+   - License: https://creativecommons.org/licenses/by/4.0/
+   - Attribution: Hughes, D. P., & Salathé, M. (2015)
+
+2. PlantDoc Dataset (CC BY 4.0)
+   - License: https://creativecommons.org/licenses/by/4.0/
+   - Attribution: Singh, D., et al. (2020)
+
+---
+
+TRAINED MODEL WEIGHTS LICENSE
+
+Trained model weights produced by this pipeline are released under 
+Apache License 2.0 to allow commercial use.
+
+Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0

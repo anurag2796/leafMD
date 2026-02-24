@@ -1,0 +1,146 @@
+# PlantVillage Detection Configuration
+# Override default settings by modifying values below
+
+# Training Configuration
+training:
+  # Model selection
+  model: "yolo26n"  # yolo26n, yolo26s, yolo11n, yolo11s
+  
+  # Training parameters
+  epochs: 50
+  batch_size: 16
+  image_size: 640
+  workers: 0  # Safe for macOS
+  
+  # Optimizer
+  optimizer: "auto"  # MuSGD (for YOLO26), auto, SGD, Adam, AdamW
+  learning_rate: null  # null = auto
+  momentum: 0.937
+  weight_decay: 0.0005
+  
+  # Training behavior
+  patience: 10  # Early stopping patience
+  device: "mps"  # auto, mps, cpu
+  amp: true  # Automatic Mixed Precision (uses BFloat16 on M4)
+  
+  # Output
+  project: "runs/train"
+  name: "exp"
+  exist_ok: true
+  resume: false
+
+# Data Augmentation
+augmentation:
+  # Geometric transformations
+  mosaic: 1.0  # Probability of mosaic augmentation
+  mixup: 0.5  # Probability of mixup augmentation
+  degrees: 10.0  # Rotation degrees
+  translate: 0.1  # Translation
+  scale: 0.5  # Scale
+  shear: 2.0  # Shear degrees
+  perspective: 0.0  # Perspective transformation
+  flipud: 0.0  # Flip up-down
+  fliplr: 0.5  # Flip left-right
+  
+  # Color augmentation
+  hsv_h: 0.015  # Hue
+  hsv_s: 0.7  # Saturation
+  hsv_v: 0.4  # Value
+  
+  # Other
+  blur: 0.0  # Blur probability (0-1)
+  noise: 0.0  # Gaussian noise probability (0-1)
+  copy_paste: 0.0  # Copy-paste augmentation
+
+# Validation Configuration
+validation:
+  split: "test"  # test or val
+  device: "cpu"  # Always use CPU to avoid MPS bugs
+  conf_threshold: 0.001  # Confidence threshold for NMS
+  iou_threshold: 0.6  # IoU threshold for NMS
+  max_det: 300  # Maximum detections per image
+
+# Export Configuration
+export:
+  # Formats to export
+  formats:
+    - "coreml"  # For iOS
+    # - "onnx"  # For cross-platform
+    # - "tflite"  # For Android
+  
+  # Quantization
+  int8: true  # Use INT8 quantization
+  calibrate: true  # Use calibration data (recommended)
+  calibration_samples: 200  # Number of calibration images
+  
+  # CoreML specific
+  coreml:
+    nms: false  # YOLO26 is NMS-free
+    minimum_ios: 17  # iOS 17+
+    compute_units: "ALL"  # ALL, CPU_AND_GPU, CPU_ONLY
+
+# Dataset Configuration
+dataset:
+  cache_dir: "data"
+  
+  # Primary dataset
+  primary:
+    source: "plantvillage"
+    split_ratio:
+      train: 0.7
+      val: 0.2
+      test: 0.1
+  
+  # Optional: Mix with field data
+  mix_field_data: false
+  field_data:
+    source: "plantdoc"
+    mix_ratio: 0.3  # 30% field, 70% lab
+
+# Model Versioning
+versioning:
+  enabled: true
+  auto_register: true
+  semantic_version:
+    major: 1
+    minor: 0
+    patch: 0
+
+# Monitoring
+monitoring:
+  # Weights & Biases integration (optional)
+  wandb:
+    enabled: false
+    project: "plantvillage-detection"
+    entity: null  # Your W&B username
+  
+  # TensorBoard
+  tensorboard:
+    enabled: false
+    log_dir: "runs/tensorboard"
+
+# Advanced
+advanced:
+  # MPS safety checks
+  mps_integrity_check: true
+  mps_check_interval: 5  # Check every N epochs
+  
+  # Memory management
+  cache_images: false  # Cache images in RAM (requires lots of memory)
+  amp: true  # Automatic Mixed Precision
+  
+  # Reproducibility
+  seed: 42
+  deterministic: false  # True = reproducible but slower
+
+# Deployment
+deployment:
+  # Production model
+  production_version: null  # Auto-set by model_registry.py
+  
+  # Model serving (optional)
+  api:
+    enabled: false
+    host: "0.0.0.0"
+    port: 8000
+    workers: 1
