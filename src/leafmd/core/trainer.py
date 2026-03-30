@@ -48,10 +48,17 @@ class ModelTrainer:
         start_time = time.time()
         
         try:
-            model_path = Path(f'{self.model_name}.pt')
-            if not model_path.exists():
-                logger.error(f"❌ Model file not found: {model_path}")
-                return None
+            if self.config.get('resume', False):
+                model_path = Path(self.config.get('project', 'runs/train')) / self.config.get('name', 'exp') / 'weights' / 'last.pt'
+                if not model_path.exists():
+                    logger.error(f"❌ Resume failed: Checkpoint not found at {model_path}")
+                    return None
+                logger.info(f"🔄 Resuming from checkpoint: {model_path}")
+            else:
+                model_path = Path(f'{self.model_name}.pt')
+                if not model_path.exists():
+                    logger.error(f"❌ Model file not found: {model_path}")
+                    return None
                 
             model = YOLO(str(model_path))
             
@@ -75,7 +82,11 @@ class ModelTrainer:
             # Validate on CPU
             logger.info("\n🔄 Running final validation on CPU...")
             best_model = YOLO(str(best_path))
-            metrics = best_model.val(device='cpu', split='test')
+            try:
+                metrics = best_model.val(device='cpu', split='val')
+            except Exception as e:
+                logger.warning(f"⚠️ Validation on 'val' split failed: {e}. Attempting 'test' split...")
+                metrics = best_model.val(device='cpu', split='test')
             
             logger.info(f"\n📊 Final Metrics:")
             logger.info(f"   mAP@50:     {metrics.box.map50:.4f}")

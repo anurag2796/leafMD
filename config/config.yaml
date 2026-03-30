@@ -25,9 +25,9 @@ training:
   
   # Output
   project: "runs/train"
-  name: "exp"
+  name: "domain_resilient_exp"
   exist_ok: true
-  resume: false
+  resume: true
 
 # Data Augmentation
 augmentation:
@@ -81,7 +81,7 @@ export:
 
 # Dataset Configuration
 dataset:
-  cache_dir: "data"
+  cache_dir: "datasets/mixed_dataset"
   
   # Primary dataset
   primary:
