@@ -1165,101 +1165,158 @@ This project aims to:
 
 ======= FILE: analyze_confusion_matrix.py =======
 
+#!/usr/bin/env python3
+"""
+analyze_confusion_matrix.py
+
+Loads the best trained model, runs validation, extracts the confusion matrix,
+and generates a normalized per-class accuracy bar chart.
+
+All paths are resolved from config/config.yaml — no hardcoded paths.
+"""
+
+import sys
+import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
+import yaml
 from pathlib import Path
 from ultralytics import YOLO
-import sys
 
-def analyze():
-    print("📊 Loading best model...")
-    model_path = Path('runs/train/exp/weights/best.pt')
+
+def analyze(config_path: str = "config/config.yaml") -> int:
+    # ── Load config ───────────────────────────
+    cfg_path = Path(config_path)
+    if not cfg_path.exists():
+        print(f"❌ Config not found at {cfg_path}")
+        return 1
+
+    with open(cfg_path) as f:
+        config = yaml.safe_load(f)
+
+    train_cfg = config.get("training", {})
+    dataset_cfg = config.get("dataset", {})
+    val_cfg = config.get("validation", {})
+
+    project = train_cfg.get("project", "runs/train")
+    name = train_cfg.get("name", "exp")
+    exp_dir = Path(project) / name
+
+    # ── Resolve model path ────────────────────
+    model_path = exp_dir / "weights" / "best.pt"
     if not model_path.exists():
         print(f"❌ Model not found at {model_path}")
         return 1
-        
+
+    print(f"📊 Loading best model from {model_path}...")
     model = YOLO(str(model_path))
-    
-    print("🔄 Running validation to get Confusion Matrix data...")
-    # Validate on test set
+
+    # ── Resolve data.yaml ─────────────────────
+    cache_dir = Path(dataset_cfg.get("cache_dir", "data"))
+    data_yaml = cache_dir / "data.yaml"
+
+    # Fallback search if not at expected location
+    if not data_yaml.exists():
+        for search_root in [cache_dir, Path("data"), Path("datasets")]:
+            if search_root.exists():
+                found = list(search_root.rglob("data.yaml"))
+                if found:
+                    data_yaml = found[0]
+                    break
+
+    if not data_yaml.exists():
+        print(f"❌ data.yaml not found (searched {cache_dir}, data/, datasets/)")
+        return 1
+
+    # ── Run validation ────────────────────────
+    val_device = val_cfg.get("device", "cpu")
+    val_split = val_cfg.get("split", "test")
+
+    print(f"🔄 Running validation on {val_device.upper()} ({val_split} split)...")
     metrics = model.val(
-        data='data/data.yaml',
-        split='test',
-        device='cpu',  # Switch to CPU to ensure deterministic behavior
-        plots=True     # Enable plots just in case it affects CM generation
+        data=str(data_yaml),
+        split=val_split,
+        device=val_device,
+        plots=True,
     )
-    
+
     print(f"✅ Validation Complete. mAP@50-95: {metrics.box.map:.4f}")
-    
-    # Extract confusion matrix
+
+    # ── Extract confusion matrix ──────────────
     cm = metrics.confusion_matrix.matrix
-    
     print(f"📊 Raw Confusion Matrix Sum: {cm.sum()}")
     print(f"   Diagonal Sum: {np.diag(cm).sum()}")
-    
-    # Class names
+
     names = model.names
-    
-    print(f"✅ Confusion Matrix extracted: {cm.shape}")
-    print(f"   Model names count: {len(names)}")
-    
-    # 1. Normalize Confusion Matrix
-    # Normalize by row (True Class)
-    row_sums = cm.sum(axis=1, keepdims=True)
-    # Avoid division by zero
-    row_sums[row_sums == 0] = 1 
-    norm_cm = cm / row_sums
-    
-    # 2. Extract Diagonal (Accuracy per class)
-    accuracy_per_class = np.diag(norm_cm)
-    
-    # Debug lengths
     class_names = list(names.values())
-    
-    # Truncate or pad if mismatch (Ultralytics sometimes adds background class)
+    print(f"✅ Confusion Matrix extracted: {cm.shape}")
+    print(f"   Model names count: {len(class_names)}")
+
+    # ── Normalize ─────────────────────────────
+    row_sums = cm.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1  # avoid division by zero
+    norm_cm = cm / row_sums
+    accuracy_per_class = np.diag(norm_cm)
+
+    # Handle class-count / matrix-dimension mismatch
+    # (Ultralytics sometimes adds a background class row/col)
     if len(class_names) != len(accuracy_per_class):
-        print(f"⚠️  Mismatch: Class names ({len(class_names)}) vs Matrix ({len(accuracy_per_class)})")
-        # If matrix is larger, likely background class or similar. Use min length.
+        print(
+            f"⚠️  Mismatch: Class names ({len(class_names)}) "
+            f"vs Matrix ({len(accuracy_per_class)})"
+        )
         min_len = min(len(class_names), len(accuracy_per_class))
         class_names = class_names[:min_len]
         accuracy_per_class = accuracy_per_class[:min_len]
         print(f"   Adjusted to length: {min_len}")
-    
-    # 3. Plot Normalized Bar Graph
+
+    # ── Plot ──────────────────────────────────
     print("📈 Generating Normalized Bar Graph...")
     plt.figure(figsize=(12, 6))
-    
-    # Create colors: Green for high accuracy, Red for low
-    colors = ['green' if x > 0.8 else 'orange' if x > 0.5 else 'red' for x in accuracy_per_class]
-    
+
+    colors = [
+        "green" if x > 0.8 else "orange" if x > 0.5 else "red"
+        for x in accuracy_per_class
+    ]
+
     sns.barplot(x=class_names, y=accuracy_per_class, palette=colors)
-    
-    plt.title('Normalized Accuracy per Class', fontsize=16)
-    plt.xlabel('Class', fontsize=12)
-    plt.ylabel('Accuracy (Normalized)', fontsize=12)
-    plt.xticks(rotation=45, ha='right')
+
+    plt.title("Normalized Accuracy per Class", fontsize=16)
+    plt.xlabel("Class", fontsize=12)
+    plt.ylabel("Accuracy (Normalized)", fontsize=12)
+    plt.xticks(rotation=45, ha="right")
     plt.ylim(0, 1.0)
-    
-    # Add value labels on top of bars
+
     for i, v in enumerate(accuracy_per_class):
-        plt.text(i, v + 0.01, f"{v:.2f}", ha='center', fontsize=10)
-        
+        plt.text(i, v + 0.01, f"{v:.2f}", ha="center", fontsize=10)
+
     plt.tight_layout()
-    output_path = 'runs/train/exp/normalized_accuracy_bar.png'
-    plt.savefig(output_path)
+
+    output_path = exp_dir / "normalized_accuracy_bar.png"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(str(output_path))
     print(f"✅ Saved plot to: {output_path}")
-    
-    # 4. Print Data Verification
+
+    # ── Print per-class accuracy ──────────────
     print("\n🔍 Data Verification (Accuracy per Class):")
-    for name, acc in zip(names.values(), accuracy_per_class):
-        print(f"   {name:<40}: {acc:.2%}")
-        
+    for name_str, acc in zip(class_names, accuracy_per_class):
+        print(f"   {name_str:<40}: {acc:.2%}")
+
     return 0
 
-if __name__ == '__main__':
-    sys.exit(analyze())
 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Analyze confusion matrix from trained model"
+    )
+    parser.add_argument(
+        "--config",
+        default="config/config.yaml",
+        help="Path to config.yaml (default: config/config.yaml)",
+    )
+    args = parser.parse_args()
+    sys.exit(analyze(config_path=args.config))
 
 ======= FILE: dataset_expander.py =======
 
@@ -1282,42 +1339,63 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Default seed for reproducible splits — override with --seed
+DEFAULT_SEED = 42
+
+
 def setup_logger():
     import logging
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-    return logging.getLogger('DatasetExpander')
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    return logging.getLogger("DatasetExpander")
+
 
 logger = setup_logger()
 
+
 def load_yaml(path: Path):
-    with open(path, 'r') as f:
+    with open(path, "r") as f:
         return yaml.safe_load(f)
 
+
 def save_yaml(data, path: Path):
-    with open(path, 'w') as f:
+    with open(path, "w") as f:
         yaml.dump(data, f, default_flow_style=False)
 
+
 def download_dataset(source: str, output_dir: Path):
-    """Attempt to download a dataset via Kaggle or Roboflow"""
+    """Attempt to download a dataset via Kaggle or Roboflow."""
     logger.info(f"Attempting to download {source} to {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    if source.lower() == 'plantdoc':
+
+    if source.lower() == "plantdoc":
         logger.info("Downloading PlantDoc dataset...")
         try:
-            # First try kaggle if api is configured
             result = subprocess.run(
-                ["kaggle", "datasets", "download", "-d", "yusufmurtaza01/plantdoc-object-detection-dataset", "-p", str(output_dir), "--unzip"],
-                capture_output=True, text=True
+                [
+                    "kaggle",
+                    "datasets",
+                    "download",
+                    "-d",
+                    "yusufmurtaza01/plantdoc-object-detection-dataset",
+                    "-p",
+                    str(output_dir),
+                    "--unzip",
+                ],
+                capture_output=True,
+                text=True,
             )
             if result.returncode == 0:
                 logger.info("Successfully downloaded PlantDoc via Kaggle.")
                 return True
             else:
-                logger.warning("Kaggle download failed or unauthorized. Make sure ~/.kaggle/kaggle.json is set up.")
+                logger.warning(
+                    "Kaggle download failed or unauthorized. "
+                    "Make sure ~/.kaggle/kaggle.json is set up."
+                )
         except FileNotFoundError:
             logger.warning("Kaggle CLI not installed or not found.")
-            
+
         logger.error(f"Could not automatically download {source}.")
         logger.error("Please download it manually into: " + str(output_dir))
         return False
@@ -1325,163 +1403,251 @@ def download_dataset(source: str, output_dir: Path):
         logger.error(f"Unknown source: {source}")
         return False
 
-def merge_classes(yaml1: dict, yaml2: dict) -> dict:
-    """Merge YOLO yaml classes to ensure consistent ID mapping"""
-    names1 = yaml1.get('names', [])
-    names2 = yaml2.get('names', [])
-    
-    # If they are dictionaries
+
+def merge_classes(yaml1: dict, yaml2: dict) -> tuple:
+    """Merge YOLO yaml classes to ensure consistent ID mapping."""
+    names1 = yaml1.get("names", [])
+    names2 = yaml2.get("names", [])
+
+    # Handle dict-style names (e.g. {0: 'classA', 1: 'classB'})
     if isinstance(names1, dict):
         names1 = [names1[k] for k in sorted(names1.keys())]
     if isinstance(names2, dict):
         names2 = [names2[k] for k in sorted(names2.keys())]
-        
+
     all_names = list(dict.fromkeys(names1 + names2))
-    
+
     merged = {
-        'names': all_names,
-        'nc': len(all_names)
+        "names": all_names,
+        "nc": len(all_names),
     }
     return merged, names1, names2
 
-def rewrite_labels(label_file: Path, out_label_file: Path, old_names: list, merged_names: list):
-    """Rewrite a YOLO label file to use the new unified class IDs"""
+
+def rewrite_labels(
+    label_file: Path,
+    out_label_file: Path,
+    old_names: list,
+    merged_names: list,
+):
+    """
+    Rewrite a YOLO label file to use the new unified class IDs.
+
+    Skips lines with invalid class IDs (out-of-range) instead of crashing.
+    """
     if not label_file.exists():
         return
-        
+
     lines = []
-    with open(label_file, 'r') as f:
+    skipped = 0
+    with open(label_file, "r") as f:
         for line in f:
             parts = line.strip().split()
             if not parts:
                 continue
-            old_id = int(parts[0])
+            try:
+                old_id = int(parts[0])
+            except ValueError:
+                skipped += 1
+                continue
+
+            # Bounds check: skip annotations referencing nonexistent classes
+            if old_id < 0 or old_id >= len(old_names):
+                logger.warning(
+                    f"Skipping invalid class ID {old_id} in {label_file} "
+                    f"(valid range: 0–{len(old_names) - 1})"
+                )
+                skipped += 1
+                continue
+
             class_name = old_names[old_id]
             new_id = merged_names.index(class_name)
-            
             parts[0] = str(new_id)
             lines.append(" ".join(parts))
-            
-    with open(out_label_file, 'w') as f:
+
+    with open(out_label_file, "w") as f:
         f.write("\n".join(lines) + "\n")
 
-def mix_datasets(plantvillage_dir: Path, plantdoc_dir: Path, output_dir: Path, ratio: float):
-    """Mix datasets together into a unified YOLO dataset"""
+    if skipped:
+        logger.warning(f"   Skipped {skipped} invalid annotations in {label_file.name}")
+
+
+def mix_datasets(
+    plantvillage_dir: Path,
+    plantdoc_dir: Path,
+    output_dir: Path,
+    ratio: float,
+    seed: int = DEFAULT_SEED,
+):
+    """Mix datasets together into a unified YOLO dataset."""
     logger.info(f"Mixing {plantvillage_dir} and {plantdoc_dir} -> {output_dir}")
-    logger.info(f"Target Lab Ratio: {ratio} (PlantVillage), Field Ratio: {1-ratio} (PlantDoc)")
-    
-    pv_yaml = plantvillage_dir / 'data.yaml' if (plantvillage_dir / 'data.yaml').exists() else plantvillage_dir / 'dataset.yaml'
-    pd_yaml = plantdoc_dir / 'data.yaml' if (plantdoc_dir / 'data.yaml').exists() else plantdoc_dir / 'dataset.yaml'
-    
+    logger.info(
+        f"Target Lab Ratio: {ratio} (PlantVillage), "
+        f"Field Ratio: {1 - ratio} (PlantDoc)"
+    )
+    logger.info(f"Random seed: {seed}")
+
+    # Set seed for reproducible splits
+    random.seed(seed)
+
+    # ── Locate data.yaml files ────────────────
+    pv_yaml = (
+        plantvillage_dir / "data.yaml"
+        if (plantvillage_dir / "data.yaml").exists()
+        else plantvillage_dir / "dataset.yaml"
+    )
+    pd_yaml = (
+        plantdoc_dir / "data.yaml"
+        if (plantdoc_dir / "data.yaml").exists()
+        else plantdoc_dir / "dataset.yaml"
+    )
+
     if not pv_yaml.exists():
         logger.error(f"Label file not found: {pv_yaml}")
         return False
     if not pd_yaml.exists():
         logger.error(f"Label file not found: {pd_yaml}")
         return False
-        
+
     pv_data = load_yaml(pv_yaml)
     pd_data = load_yaml(pd_yaml)
-    
+
     merged_data, pv_names, pd_names = merge_classes(pv_data, pd_data)
-    merged_names = merged_data['names']
+    merged_names = merged_data["names"]
     logger.info(f"Unified into {len(merged_names)} total classes.")
-    
-    # Create output directories
-    for split in ['train', 'valid', 'test']:
-        (output_dir / split / 'images').mkdir(parents=True, exist_ok=True)
-        (output_dir / split / 'labels').mkdir(parents=True, exist_ok=True)
-        
-    # Standardize 'val' vs 'valid'
+
+    # ── Create output directories ─────────────
+    for split in ["train", "valid", "test"]:
+        (output_dir / split / "images").mkdir(parents=True, exist_ok=True)
+        (output_dir / split / "labels").mkdir(parents=True, exist_ok=True)
+
+    # ── Helper: resolve split dirs ────────────
     def get_image_and_label_dirs(base_dir: Path, target_split: str):
-        # standard yolov8 layout: data/images/train/ and data/labels/train/
         split_names = [target_split]
-        if target_split == 'valid':
-            split_names.append('val')
-            
+        if target_split == "valid":
+            split_names.append("val")
+
         for sn in split_names:
             # Layout 1: train/images and train/labels
-            if (base_dir / sn / 'images').exists():
-                return base_dir / sn / 'images', base_dir / sn / 'labels'
+            if (base_dir / sn / "images").exists():
+                return base_dir / sn / "images", base_dir / sn / "labels"
             # Layout 2: images/train and labels/train
-            if (base_dir / 'images' / sn).exists():
-                return base_dir / 'images' / sn, base_dir / 'labels' / sn
-                
+            if (base_dir / "images" / sn).exists():
+                return base_dir / "images" / sn, base_dir / "labels" / sn
+
         return None, None
 
-    splits = ['train', 'valid', 'test']
-    
+    # ── Process each split ────────────────────
+    splits = ["train", "valid", "test"]
+
     for split in splits:
         logger.info(f"Processing {split} split...")
-        
+
         pv_img_dir, pv_lbl_dir = get_image_and_label_dirs(plantvillage_dir, split)
         pd_img_dir, pd_lbl_dir = get_image_and_label_dirs(plantdoc_dir, split)
-        
-        pv_images = list(pv_img_dir.glob('*.*')) if pv_img_dir else []
-        pd_images = list(pd_img_dir.glob('*.*')) if pd_img_dir else []
-        
-        # Calculate how many to keep to hit ratio based on the limiting dataset
-        # V = pv count, D = pd count
-        # Target: V / (V + D') = ratio  => V = ratio * (V + D') => V/ratio - V = D'
-        # D' = V * (1-ratio) / ratio
-        
+
+        pv_images = sorted(pv_img_dir.glob("*.*")) if pv_img_dir else []
+        pd_images = sorted(pd_img_dir.glob("*.*")) if pd_img_dir else []
+
         if len(pv_images) == 0 and len(pd_images) == 0:
             continue
-            
+
+        # Calculate target counts to hit the desired lab/field ratio
         target_pd = int(len(pv_images) * ((1.0 - ratio) / ratio))
         if target_pd > len(pd_images):
-            # We don't have enough field data, so we scale down PlantVillage instead
-            # D / (V' + D) = 1 - ratio => V' = D * ratio / (1-ratio)
+            # Not enough field data — scale down PlantVillage
             target_pv = int(len(pd_images) * (ratio / (1.0 - ratio)))
             target_pd = len(pd_images)
         else:
             target_pv = len(pv_images)
-            
-        logger.info(f"  Selecting {target_pv} PlantVillage images and {target_pd} PlantDoc images for {split}")
-        
-        selected_pv = random.sample(pv_images, target_pv) if target_pv < len(pv_images) else pv_images
-        selected_pd = random.sample(pd_images, target_pd) if target_pd < len(pd_images) else pd_images
-        
-        # Copy PV
-        for i, img_path in enumerate(selected_pv):
-            # format: pv_{original_name}
-            out_img = output_dir / split / 'images' / f"pv_{img_path.name}"
+
+        logger.info(
+            f"  Selecting {target_pv} PlantVillage images "
+            f"and {target_pd} PlantDoc images for {split}"
+        )
+
+        selected_pv = (
+            random.sample(pv_images, target_pv)
+            if target_pv < len(pv_images)
+            else pv_images
+        )
+        selected_pd = (
+            random.sample(pd_images, target_pd)
+            if target_pd < len(pd_images)
+            else pd_images
+        )
+
+        # Copy PlantVillage images + labels
+        for img_path in selected_pv:
+            out_img = output_dir / split / "images" / f"pv_{img_path.name}"
             shutil.copy2(img_path, out_img)
-            
-            lbl_path = pv_lbl_dir / f"{img_path.stem}.txt"
-            out_lbl = output_dir / split / 'labels' / f"pv_{img_path.stem}.txt"
-            rewrite_labels(lbl_path, out_lbl, pv_names, merged_names)
-            
-        # Copy PD
-        for i, img_path in enumerate(selected_pd):
-            out_img = output_dir / split / 'images' / f"pd_{img_path.name}"
+
+            if pv_lbl_dir:
+                lbl_path = pv_lbl_dir / f"{img_path.stem}.txt"
+                out_lbl = output_dir / split / "labels" / f"pv_{img_path.stem}.txt"
+                rewrite_labels(lbl_path, out_lbl, pv_names, merged_names)
+
+        # Copy PlantDoc images + labels
+        for img_path in selected_pd:
+            out_img = output_dir / split / "images" / f"pd_{img_path.name}"
             shutil.copy2(img_path, out_img)
-            
-            lbl_path = pd_lbl_dir / f"{img_path.stem}.txt"
-            out_lbl = output_dir / split / 'labels' / f"pd_{img_path.stem}.txt"
-            rewrite_labels(lbl_path, out_lbl, pd_names, merged_names)
-            
-    # Write new data.yaml
-    merged_data['train'] = 'train/images'
-    merged_data['val'] = 'valid/images'
-    merged_data['test'] = 'test/images'
-    save_yaml(merged_data, output_dir / 'data.yaml')
-    
+
+            if pd_lbl_dir:
+                lbl_path = pd_lbl_dir / f"{img_path.stem}.txt"
+                out_lbl = output_dir / split / "labels" / f"pd_{img_path.stem}.txt"
+                rewrite_labels(lbl_path, out_lbl, pd_names, merged_names)
+
+    # ── Write unified data.yaml ───────────────
+    merged_data["train"] = "train/images"
+    merged_data["val"] = "valid/images"
+    merged_data["test"] = "test/images"
+    save_yaml(merged_data, output_dir / "data.yaml")
+
     logger.info(f"✅ Mixed dataset created successfully at {output_dir}")
     return True
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='PlantVillage Dataset Expander (Domain Mixing)')
-    parser.add_argument('--source', type=str, help='Dataset to download (e.g. plantdoc)')
-    parser.add_argument('--output', type=str, default='datasets/mixed_dataset', help='Output directory')
-    
-    parser.add_argument('--mix', action='store_true', help='Mix two datasets')
-    parser.add_argument('--plantvillage', type=str, default='datasets/plantvillage', help='Path to baseline PlantVillage dataset')
-    parser.add_argument('--plantdoc', type=str, default='datasets/plantdoc', help='Path to PlantDoc dataset')
-    parser.add_argument('--ratio', type=float, default=0.7, help='Ratio of lab data vs field data (e.g., 0.7 = 70% Lab)')
-    
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="PlantVillage Dataset Expander (Domain Mixing)"
+    )
+    parser.add_argument(
+        "--source", type=str, help="Dataset to download (e.g. plantdoc)"
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="datasets/mixed_dataset",
+        help="Output directory",
+    )
+    parser.add_argument("--mix", action="store_true", help="Mix two datasets")
+    parser.add_argument(
+        "--plantvillage",
+        type=str,
+        default="datasets/plantvillage",
+        help="Path to baseline PlantVillage dataset",
+    )
+    parser.add_argument(
+        "--plantdoc",
+        type=str,
+        default="datasets/plantdoc",
+        help="Path to PlantDoc dataset",
+    )
+    parser.add_argument(
+        "--ratio",
+        type=float,
+        default=0.7,
+        help="Ratio of lab data vs field data (e.g., 0.7 = 70%% Lab)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help=f"Random seed for reproducible splits (default: {DEFAULT_SEED})",
+    )
+
     args = parser.parse_args()
-    
+
     if args.mix:
         if not Path(args.plantvillage).exists():
             logger.error(f"PlantVillage dataset not found at {args.plantvillage}")
@@ -1489,8 +1655,14 @@ if __name__ == '__main__':
         if not Path(args.plantdoc).exists():
             logger.error(f"PlantDoc dataset not found at {args.plantdoc}")
             sys.exit(1)
-            
-        success = mix_datasets(Path(args.plantvillage), Path(args.plantdoc), Path(args.output), args.ratio)
+
+        success = mix_datasets(
+            Path(args.plantvillage),
+            Path(args.plantdoc),
+            Path(args.output),
+            args.ratio,
+            seed=args.seed,
+        )
         if not success:
             sys.exit(1)
     elif args.source:
@@ -1501,27 +1673,28 @@ if __name__ == '__main__':
         parser.print_help()
         sys.exit(0)
 
-
 ======= FILE: plantvillage_pipeline.py =======
 
 #!/usr/bin/env python3
 """
-plantvillage_pipeline.py - End-to-End Pipeline
-Orchestrates training, export, and inference for the PlantVillage Disease Detection System.
+plantvillage_pipeline.py — End-to-End Pipeline
+
+Orchestrates training, export, and inference for the PlantVillage Disease
+Detection System.  All paths and settings are resolved from config/config.yaml.
 """
 
 import sys
 import argparse
 import logging
 from pathlib import Path
-import yaml
 
-# Add src to path
-sys.path.append(str(Path.cwd() / 'src'))
+# Stable import
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 try:
     from train import main as train_main
     from export import main as export_main
+    from leafmd.core.config import PipelineConfig
     from leafmd.core.environment import EnvironmentValidator
 except ImportError as e:
     print(f"❌ Failed to import modules: {e}")
@@ -1529,40 +1702,46 @@ except ImportError as e:
     sys.exit(1)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(message)s')
-logger = logging.getLogger('pipeline')
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger("pipeline")
 
-def run_pipeline(args):
-    print("="*80)
+CONFIG_PATH = Path(__file__).resolve().parent / "config" / "config.yaml"
+
+
+def run_pipeline(args) -> int:
+    print("=" * 80)
     print("🌿  PlantVillage End-to-End Pipeline")
-    print("="*80 + "\n")
-    
-    # 1. Environment Check
+    print("=" * 80 + "\n")
+
+    # Load config
+    cfg = PipelineConfig.from_yaml(CONFIG_PATH)
+
+    # ── 1. Environment Check ──────────────────
     if not args.skip_env:
         is_valid, device, info = EnvironmentValidator.validate()
         if not is_valid and not args.force:
             logger.error("❌ Environment check failed. Use --force to proceed anyway.")
             return 1
-            
-    # 2. Training
+
+    # ── 2. Training ───────────────────────────
     if not args.skip_train:
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("🏋️  STARTING TRAINING PHASE")
-        print("="*80 + "\n")
+        print("=" * 80 + "\n")
         try:
-            exit_code = train_main() 
+            exit_code = train_main()
             if exit_code != 0:
                 logger.error("❌ Training failed.")
                 return exit_code
         except Exception as e:
             logger.error(f"❌ Training crashed: {e}")
             return 1
-            
-    # 3. Export
+
+    # ── 3. Export ─────────────────────────────
     if not args.skip_export:
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("📦  STARTING EXPORT PHASE")
-        print("="*80 + "\n")
+        print("=" * 80 + "\n")
         try:
             exit_code = export_main()
             if exit_code != 0:
@@ -1571,59 +1750,49 @@ def run_pipeline(args):
         except Exception as e:
             logger.error(f"❌ Export crashed: {e}")
             return 1
-            
-    # 4. Results / Inference
-    print("\n" + "="*80)
+
+    # ── 4. Summary ────────────────────────────
+    print("\n" + "=" * 80)
     print("✅  PIPELINE COMPLETION SUMMARY")
-    print("="*80 + "\n")
-    
-    # Locate best model and results
-    config_path = Path('config/config.yaml')
+    print("=" * 80 + "\n")
+
+    exp_dir = cfg.experiment_dir
+    best_model = cfg.best_weights_path
+    coreml_model = exp_dir / "weights" / "best.mlpackage"
+    results_csv = exp_dir / "results.csv"
     results_found = False
-    
-    if config_path.exists():
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-            project = config.get('training', {}).get('project', 'runs/train')
-            name = config.get('training', {}).get('name', 'exp')
-            
-            # Paths
-            exp_dir = Path(project) / name
-            best_model = exp_dir / 'weights' / 'best.pt'
-            coreml_model = exp_dir / 'weights' / 'best.mlpackage'
-            results_csv = exp_dir / 'results.csv'
-            
-            if best_model.exists():
-                print(f"✅ Trained Model:   {best_model}")
-                results_found = True
-            
-            if coreml_model.exists():
-                print(f"✅ Exported Model:  {coreml_model}")
-            
-            if results_csv.exists():
-                print(f"📊 Training Logs:   {results_csv}")
-            
-            print(f"\n📂 All results in:  {exp_dir}")
-            
+
+    if best_model.exists():
+        print(f"✅ Trained Model:   {best_model}")
+        results_found = True
+
+    if coreml_model.exists():
+        print(f"✅ Exported Model:  {coreml_model}")
+
+    if results_csv.exists():
+        print(f"📊 Training Logs:   {results_csv}")
+
+    print(f"\n📂 All results in:  {exp_dir}")
+
     if not results_found and not args.skip_train:
-         print("⚠️  Warning: Could not verify output files.")
+        print("⚠️  Warning: Could not verify output files.")
 
     return 0
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='PlantVillage End-to-End Pipeline')
-    parser.add_argument('--skip-env', action='store_true', help='Skip environment check')
-    parser.add_argument('--skip-train', action='store_true', help='Skip training phase')
-    parser.add_argument('--skip-export', action='store_true', help='Skip export phase')
-    parser.add_argument('--force', action='store_true', help='Force execution despite errors')
-    
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="PlantVillage End-to-End Pipeline")
+    parser.add_argument("--skip-env", action="store_true", help="Skip environment check")
+    parser.add_argument("--skip-train", action="store_true", help="Skip training phase")
+    parser.add_argument("--skip-export", action="store_true", help="Skip export phase")
+    parser.add_argument("--force", action="store_true", help="Force execution despite errors")
+
     args = parser.parse_args()
     try:
         sys.exit(run_pipeline(args))
     except KeyboardInterrupt:
         print("\n⚠️ Pipeline interrupted by user.")
         sys.exit(130)
-
 
 ======= FILE: config/config.yaml =======
 
@@ -1683,7 +1852,7 @@ augmentation:
 
 # Validation Configuration
 validation:
-  split: "test"  # test or val
+  split: "val"  # test or val
   device: "cpu"  # Always use CPU to avoid MPS bugs
   conf_threshold: 0.001  # Confidence threshold for NMS
   iou_threshold: 0.6  # IoU threshold for NMS
@@ -1773,6 +1942,715 @@ deployment:
     host: "0.0.0.0"
     port: 8000
     workers: 1
+
+
+======= FILE: tests/conftest.py =======
+
+"""
+conftest.py — Shared pytest fixtures for the LeafMD test suite.
+"""
+
+import pytest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+import yaml
+
+
+@pytest.fixture
+def tmp_dataset(tmp_path):
+    """Create a minimal YOLO dataset structure for testing."""
+    data = {
+        "nc": 2,
+        "names": ["Tomato_healthy", "Tomato_Early_blight"],
+        "train": "train/images",
+        "val": "valid/images",
+        "test": "test/images",
+    }
+    yaml_path = tmp_path / "data.yaml"
+    with open(yaml_path, "w") as f:
+        yaml.dump(data, f)
+
+    for split in ["train", "valid", "test"]:
+        (tmp_path / split / "images").mkdir(parents=True)
+        (tmp_path / split / "labels").mkdir(parents=True)
+        # Create a dummy image file (just needs to exist)
+        (tmp_path / split / "images" / "img_001.jpg").write_bytes(b"\xff\xd8\xff")
+        # Create a dummy label
+        (tmp_path / split / "labels" / "img_001.txt").write_text("0 0.5 0.5 0.3 0.3\n")
+
+    return tmp_path, yaml_path
+
+
+@pytest.fixture
+def sample_config_yaml(tmp_path):
+    """Create a minimal config.yaml for testing."""
+    config = {
+        "training": {
+            "model": "yolo26n",
+            "epochs": 2,
+            "batch_size": 4,
+            "image_size": 640,
+            "workers": 0,
+            "optimizer": "auto",
+            "learning_rate": None,
+            "momentum": 0.937,
+            "weight_decay": 0.0005,
+            "patience": 5,
+            "device": "cpu",
+            "amp": True,
+            "project": str(tmp_path / "runs" / "train"),
+            "name": "test_exp",
+            "exist_ok": True,
+            "resume": False,
+        },
+        "augmentation": {
+            "mosaic": 1.0,
+            "mixup": 0.0,
+            "hsv_h": 0.015,
+            "hsv_s": 0.7,
+            "hsv_v": 0.4,
+            "degrees": 0.0,
+            "translate": 0.1,
+            "scale": 0.5,
+            "shear": 0.0,
+            "flipud": 0.0,
+            "fliplr": 0.5,
+        },
+        "validation": {
+            "split": "test",
+            "device": "cpu",
+        },
+        "export": {
+            "formats": ["coreml"],
+            "int8": True,
+            "calibration_samples": 10,
+        },
+        "dataset": {
+            "cache_dir": str(tmp_path / "data"),
+            "mix_field_data": False,
+        },
+        "monitoring": {
+            "wandb": {"enabled": False},
+            "tensorboard": {"enabled": False},
+        },
+    }
+    config_path = tmp_path / "config.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config, f)
+    return config_path
+
+
+@pytest.fixture
+def mock_mps_available():
+    """Mock MPS as available and operational."""
+    with patch("torch.backends.mps.is_available", return_value=True), \
+         patch("torch.backends.mps.is_built", return_value=True):
+        yield
+
+
+@pytest.fixture
+def mock_mps_unavailable():
+    """Mock MPS as unavailable."""
+    with patch("torch.backends.mps.is_available", return_value=False), \
+         patch("torch.backends.mps.is_built", return_value=True):
+        yield
+
+
+======= FILE: tests/unit/test_config.py =======
+
+"""
+test_config.py — Tests for the centralized PipelineConfig.
+"""
+
+import pytest
+import yaml
+from pathlib import Path
+
+from leafmd.core.config import TrainConfig, ExportConfig, DatasetConfig, PipelineConfig
+
+
+class TestTrainConfig:
+    def test_defaults(self):
+        cfg = TrainConfig()
+        assert cfg.model == "yolo26n"
+        assert cfg.workers == 0
+        assert cfg.amp is True
+        assert cfg.device == "mps"
+
+    def test_from_yaml(self, sample_config_yaml):
+        cfg = TrainConfig.from_yaml(sample_config_yaml)
+        assert cfg.epochs == 2
+        assert cfg.batch == 4  # remapped from batch_size
+        assert cfg.imgsz == 640  # remapped from image_size
+        assert cfg.device == "cpu"
+
+    def test_batch_size_remap(self, tmp_path):
+        """config.yaml uses 'batch_size' but YOLO expects 'batch'."""
+        config = {
+            "training": {"batch_size": 32, "image_size": 320},
+        }
+        p = tmp_path / "cfg.yaml"
+        with open(p, "w") as f:
+            yaml.dump(config, f)
+
+        cfg = TrainConfig.from_yaml(p)
+        assert cfg.batch == 32
+        assert cfg.imgsz == 320
+
+    def test_to_yolo_kwargs_excludes_model_and_device(self, sample_config_yaml):
+        cfg = TrainConfig.from_yaml(sample_config_yaml)
+        kwargs = cfg.to_yolo_kwargs()
+        assert "model" not in kwargs
+        assert "device" not in kwargs
+        assert "epochs" in kwargs
+        assert "batch" in kwargs
+
+    def test_to_yolo_kwargs_strips_none(self):
+        cfg = TrainConfig(lr0=None)
+        kwargs = cfg.to_yolo_kwargs()
+        assert "lr0" not in kwargs
+
+    def test_unknown_keys_ignored(self, tmp_path):
+        """Keys in YAML that aren't dataclass fields should be silently skipped."""
+        config = {
+            "training": {"epochs": 10, "unknown_param": "hello"},
+        }
+        p = tmp_path / "cfg.yaml"
+        with open(p, "w") as f:
+            yaml.dump(config, f)
+
+        cfg = TrainConfig.from_yaml(p)
+        assert cfg.epochs == 10
+        assert not hasattr(cfg, "unknown_param")
+
+    def test_augmentation_merged(self, sample_config_yaml):
+        cfg = TrainConfig.from_yaml(sample_config_yaml)
+        assert cfg.mosaic == 1.0
+        assert cfg.mixup == 0.0
+
+
+class TestExportConfig:
+    def test_defaults(self):
+        cfg = ExportConfig()
+        assert cfg.formats == ["coreml"]
+        assert cfg.int8 is True
+
+    def test_from_yaml(self, sample_config_yaml):
+        cfg = ExportConfig.from_yaml(sample_config_yaml)
+        assert cfg.int8 is True
+        assert "coreml" in cfg.formats
+
+
+class TestDatasetConfig:
+    def test_from_yaml(self, sample_config_yaml):
+        cfg = DatasetConfig.from_yaml(sample_config_yaml)
+        assert "data" in cfg.cache_dir
+        assert cfg.mix_field_data is False
+
+
+class TestPipelineConfig:
+    def test_full_load(self, sample_config_yaml):
+        cfg = PipelineConfig.from_yaml(sample_config_yaml)
+        assert cfg.train.epochs == 2
+        assert cfg.export.int8 is True
+        assert cfg.validation.device == "cpu"
+
+    def test_best_weights_path(self, sample_config_yaml):
+        cfg = PipelineConfig.from_yaml(sample_config_yaml)
+        expected = Path(cfg.train.project) / cfg.train.name / "weights" / "best.pt"
+        assert cfg.best_weights_path == expected
+
+    def test_missing_config_uses_defaults(self, tmp_path):
+        """If config file doesn't exist, PipelineConfig should use defaults."""
+        cfg = PipelineConfig.from_yaml(tmp_path / "nonexistent.yaml")
+        assert cfg.train.model == "yolo26n"
+        assert cfg.train.epochs == 50
+
+
+======= FILE: tests/unit/test_dataset.py =======
+
+"""
+test_dataset.py — Tests for DatasetLoader cache resolution and fallback logic.
+"""
+
+import pytest
+from unittest.mock import patch, MagicMock
+from pathlib import Path
+
+from leafmd.core.dataset import DatasetLoader
+
+
+class TestUseCached:
+    def test_finds_top_level_data_yaml(self, tmp_path):
+        """Top-level data.yaml should be preferred."""
+        (tmp_path / "data.yaml").write_text("nc: 15\nnames: ['a']")
+        loader = DatasetLoader(cache_dir=str(tmp_path))
+        result = loader._use_cached()
+        assert result == tmp_path / "data.yaml"
+
+    def test_finds_one_level_deep(self, tmp_path):
+        """data.yaml one directory deep should be found."""
+        sub = tmp_path / "PlantVillage-1"
+        sub.mkdir()
+        (sub / "data.yaml").write_text("nc: 15\nnames: ['a']")
+        loader = DatasetLoader(cache_dir=str(tmp_path))
+        result = loader._use_cached()
+        assert result == sub / "data.yaml"
+
+    def test_prefers_top_level_over_nested(self, tmp_path):
+        """If both exist, top-level wins."""
+        (tmp_path / "data.yaml").write_text("nc: 15\nnames: ['top']")
+        sub = tmp_path / "nested"
+        sub.mkdir()
+        (sub / "data.yaml").write_text("nc: 5\nnames: ['nested']")
+
+        loader = DatasetLoader(cache_dir=str(tmp_path))
+        result = loader._use_cached()
+        assert result == tmp_path / "data.yaml"
+
+    def test_returns_none_when_empty(self, tmp_path):
+        loader = DatasetLoader(cache_dir=str(tmp_path))
+        result = loader._use_cached()
+        assert result is None
+
+    def test_ignores_deeply_nested(self, tmp_path):
+        """data.yaml two+ levels deep should NOT be found by _use_cached."""
+        deep = tmp_path / "a" / "b"
+        deep.mkdir(parents=True)
+        (deep / "data.yaml").write_text("nc: 1\nnames: ['deep']")
+
+        loader = DatasetLoader(cache_dir=str(tmp_path))
+        result = loader._use_cached()
+        assert result is None
+
+
+class TestLoad:
+    def test_returns_cached_yaml_when_available(self, tmp_path):
+        (tmp_path / "data.yaml").write_text("nc: 15\nnames: ['a']")
+        loader = DatasetLoader(cache_dir=str(tmp_path))
+        result = loader.load()
+        assert result == tmp_path / "data.yaml"
+
+    @patch.dict("os.environ", {"ROBOFLOW_API_KEY": "fake_key"})
+    def test_roboflow_fallback_on_no_cache(self, tmp_path):
+        """When cache is empty, should try Roboflow."""
+        loader = DatasetLoader(cache_dir=str(tmp_path))
+
+        # Create the expected download result
+        dl_dir = tmp_path / "downloaded"
+        dl_dir.mkdir()
+        (dl_dir / "data.yaml").write_text("nc: 15\nnames: ['a']")
+
+        mock_dataset = MagicMock()
+        mock_dataset.location = str(dl_dir)
+
+        mock_rf = MagicMock()
+        (mock_rf.workspace.return_value
+         .project.return_value
+         .version.return_value
+         .download.return_value) = mock_dataset
+
+        with patch("leafmd.core.dataset.Roboflow", return_value=mock_rf):
+            result = loader.load()
+
+        assert result is not None
+        assert "data.yaml" in str(result)
+
+    def test_all_fail_returns_none(self, tmp_path):
+        """When cache, Roboflow, and Kaggle all fail, should return None."""
+        loader = DatasetLoader(cache_dir=str(tmp_path))
+
+        with patch.dict("os.environ", {}, clear=True):
+            result = loader.load()
+
+        assert result is None
+
+
+======= FILE: tests/unit/test_environment.py =======
+
+"""
+test_environment.py — Tests for EnvironmentValidator and MPS safety helpers.
+"""
+
+import pytest
+from unittest.mock import patch, MagicMock
+
+from leafmd.core.environment import EnvironmentValidator
+
+
+class TestGetSafeWorkerCount:
+    def test_mps_forces_zero_workers(self):
+        assert EnvironmentValidator.get_safe_worker_count("mps") == 0
+
+    def test_cpu_allows_workers(self):
+        with patch("os.cpu_count", return_value=8):
+            result = EnvironmentValidator.get_safe_worker_count("cpu")
+            assert result == 4  # min(8, 4)
+
+    def test_cpu_with_low_core_count(self):
+        with patch("os.cpu_count", return_value=2):
+            result = EnvironmentValidator.get_safe_worker_count("cpu")
+            assert result == 2
+
+    def test_cpu_with_none_core_count(self):
+        """os.cpu_count() can return None on some platforms."""
+        with patch("os.cpu_count", return_value=None):
+            result = EnvironmentValidator.get_safe_worker_count("cpu")
+            assert result == 1
+
+
+class TestGetValidationDevice:
+    def test_mps_training_returns_cpu_for_validation(self):
+        assert EnvironmentValidator.get_validation_device("mps") == "cpu"
+
+    def test_cpu_training_returns_cpu_for_validation(self):
+        assert EnvironmentValidator.get_validation_device("cpu") == "cpu"
+
+    def test_cuda_training_returns_cuda_for_validation(self):
+        assert EnvironmentValidator.get_validation_device("cuda") == "cuda"
+
+
+class TestIsMPSSafe:
+    @patch("torch.backends.mps.is_available", return_value=False)
+    def test_returns_false_when_mps_unavailable(self, _):
+        assert EnvironmentValidator.is_mps_safe() is False
+
+    @patch("torch.backends.mps.is_available", return_value=True)
+    def test_returns_true_on_successful_matmul(self, _):
+        mock_tensor = MagicMock()
+        mock_tensor.__matmul__ = MagicMock(return_value=mock_tensor)
+        mock_tensor.T = mock_tensor
+
+        with patch("torch.randn", return_value=mock_tensor):
+            assert EnvironmentValidator.is_mps_safe() is True
+
+    @patch("torch.backends.mps.is_available", return_value=True)
+    def test_returns_false_on_matmul_crash(self, _):
+        with patch("torch.randn", side_effect=RuntimeError("MPS error")):
+            assert EnvironmentValidator.is_mps_safe() is False
+
+
+class TestValidate:
+    @patch("torch.backends.mps.is_available", return_value=False)
+    @patch("torch.backends.mps.is_built", return_value=True)
+    @patch("shutil.disk_usage")
+    @patch("platform.machine", return_value="arm64")
+    def test_no_mps_falls_back_to_cpu(self, _machine, mock_disk, _built, _avail):
+        mock_disk.return_value = MagicMock(free=50 * 1024**3)  # 50GB
+        _, device, info = EnvironmentValidator.validate()
+        assert device == "cpu"
+
+    @patch("torch.backends.mps.is_available", return_value=True)
+    @patch("torch.backends.mps.is_built", return_value=True)
+    @patch("shutil.disk_usage")
+    @patch("platform.machine", return_value="arm64")
+    def test_mps_available_uses_mps(self, _machine, mock_disk, _built, _avail):
+        mock_disk.return_value = MagicMock(free=50 * 1024**3)
+        mock_tensor = MagicMock()
+        mock_tensor.__matmul__ = MagicMock(return_value=mock_tensor)
+        mock_tensor.T = mock_tensor
+
+        with patch("torch.randn", return_value=mock_tensor):
+            _, device, _ = EnvironmentValidator.validate()
+            assert device == "mps"
+
+    @patch("torch.backends.mps.is_available", return_value=True)
+    @patch("torch.backends.mps.is_built", return_value=True)
+    @patch("shutil.disk_usage")
+    @patch("platform.machine", return_value="arm64")
+    def test_low_disk_reported_as_issue(self, _machine, mock_disk, _built, _avail):
+        mock_disk.return_value = MagicMock(free=5 * 1024**3)  # 5GB — too low
+        mock_tensor = MagicMock()
+        mock_tensor.__matmul__ = MagicMock(return_value=mock_tensor)
+        mock_tensor.T = mock_tensor
+
+        with patch("torch.randn", return_value=mock_tensor):
+            is_valid, _, info = EnvironmentValidator.validate()
+            assert not is_valid
+
+
+======= FILE: tests/unit/test_exporter.py =======
+
+"""
+test_exporter.py — Tests for ModelExporter, CoreML fallback chain,
+and quantization verification.
+"""
+
+import pytest
+from unittest.mock import MagicMock, patch, PropertyMock
+from pathlib import Path
+
+from leafmd.core.exporter import ModelExporter, CoreMLExportResult
+
+
+@pytest.fixture
+def exporter(tmp_path):
+    return ModelExporter(tmp_path / "fake_model.pt", tmp_path / "fake_data.yaml")
+
+
+class TestCoreMLFallbackChain:
+    def test_int8_success_returns_int8(self, exporter):
+        mock_model = MagicMock()
+        mock_model.export.return_value = "/tmp/model.mlpackage"
+
+        with patch.object(exporter, "_verify_quantization", return_value=True):
+            result = exporter._export_coreml_robust(mock_model, int8=True)
+
+        assert isinstance(result, CoreMLExportResult)
+        assert result.precision == "int8"
+        assert result.path == Path("/tmp/model.mlpackage")
+        mock_model.export.assert_called_once()
+
+    def test_int8_verify_fails_falls_to_fp16(self, exporter):
+        mock_model = MagicMock()
+        mock_model.export.side_effect = [
+            "/tmp/int8.mlpackage",        # INT8 "succeeds" (export)
+            "/tmp/fp16.mlpackage",         # FP16
+        ]
+
+        with patch.object(exporter, "_verify_quantization", return_value=False):
+            result = exporter._export_coreml_robust(mock_model, int8=True)
+
+        assert result.precision == "fp16"
+        assert result.path == Path("/tmp/fp16.mlpackage")
+
+    def test_int8_exception_falls_to_fp16(self, exporter):
+        mock_model = MagicMock()
+        mock_model.export.side_effect = [
+            RuntimeError("INT8 failed"),
+            "/tmp/fp16.mlpackage",
+        ]
+
+        result = exporter._export_coreml_robust(mock_model, int8=True)
+        assert result.precision == "fp16"
+        assert mock_model.export.call_count == 2
+
+    def test_int8_and_fp16_fail_falls_to_fp32(self, exporter):
+        mock_model = MagicMock()
+        mock_model.export.side_effect = [
+            RuntimeError("INT8 failed"),
+            RuntimeError("FP16 failed"),
+            "/tmp/fp32.mlpackage",
+        ]
+
+        result = exporter._export_coreml_robust(mock_model, int8=True)
+        assert result.precision == "fp32"
+        assert mock_model.export.call_count == 3
+
+    def test_all_attempts_fail_returns_none(self, exporter):
+        mock_model = MagicMock()
+        mock_model.export.side_effect = RuntimeError("everything is broken")
+
+        result = exporter._export_coreml_robust(mock_model, int8=True)
+        assert result.path is None
+        assert result.precision == "failed"
+        assert mock_model.export.call_count == 3
+
+    def test_no_int8_skips_to_fp16(self, exporter):
+        mock_model = MagicMock()
+        mock_model.export.return_value = "/tmp/fp16.mlpackage"
+
+        result = exporter._export_coreml_robust(mock_model, int8=False)
+        assert result.precision == "fp16"
+        # Should only have 1 call (FP16), not 2
+        mock_model.export.assert_called_once()
+
+
+class TestVerifyQuantization:
+    def test_strict_false_returns_true_on_exception(self, exporter):
+        """Non-strict mode should NOT fail when verification itself crashes."""
+        with patch("leafmd.core.exporter.ct") as mock_ct:
+            mock_ct.models.MLModel.side_effect = Exception("protobuf error")
+            result = exporter._verify_quantization(Path("/fake"), strict=False)
+            assert result is True
+
+    def test_strict_true_returns_false_on_exception(self, exporter):
+        """Strict mode should fail when verification crashes."""
+        with patch("leafmd.core.exporter.ct") as mock_ct:
+            mock_ct.models.MLModel.side_effect = Exception("protobuf error")
+            result = exporter._verify_quantization(Path("/fake"), strict=True)
+            assert result is False
+
+    def test_returns_false_when_zero_quantized_ops(self, exporter):
+        """If model has ops but none are quantized, verification should fail."""
+        mock_spec = MagicMock()
+        mock_spec.WhichOneof.return_value = "mlProgram"
+
+        # Simulate an mlProgram with 10 ops, none quantized
+        mock_op = MagicMock()
+        mock_op.type = "conv"
+
+        mock_block = MagicMock()
+        mock_block.operations = [mock_op] * 10
+
+        mock_function = MagicMock()
+        mock_function.block_specializations.values.return_value = [mock_block]
+
+        mock_spec.mlProgram.functions.values.return_value = [mock_function]
+
+        with patch("leafmd.core.exporter.ct") as mock_ct:
+            mock_model = MagicMock()
+            mock_model.get_spec.return_value = mock_spec
+            mock_ct.models.MLModel.return_value = mock_model
+
+            result = exporter._verify_quantization(Path("/fake"), strict=True)
+            assert result is False
+
+
+class TestExportMethod:
+    def test_export_returns_dict(self, exporter):
+        """export() should return a dict mapping format → path."""
+        with patch.object(exporter, "_export_coreml_robust") as mock_coreml:
+            mock_coreml.return_value = CoreMLExportResult(
+                path=Path("/tmp/model.mlpackage"), precision="int8"
+            )
+            with patch("leafmd.core.exporter.YOLO"):
+                result = exporter.export(formats=["coreml"], int8=True)
+
+            assert "coreml" in result
+
+    def test_unknown_format_skipped(self, exporter):
+        with patch("leafmd.core.exporter.YOLO"):
+            result = exporter.export(formats=["unknown_format"], int8=True)
+            assert "unknown_format" not in result
+
+
+======= FILE: tests/unit/test_registry.py =======
+
+"""
+test_registry.py — Tests for ModelRegistry version management.
+"""
+
+import pytest
+import json
+from pathlib import Path
+
+from leafmd.tools.registry import ModelRegistry, _version_sort_key
+
+
+class TestVersionSortKey:
+    def test_simple_version(self):
+        assert _version_sort_key("1.0.0") == (1, 0, 0)
+
+    def test_double_digit(self):
+        assert _version_sort_key("1.10.2") == (1, 10, 2)
+
+    def test_ordering(self):
+        versions = ["1.9.0", "1.10.0", "1.2.0", "2.0.0"]
+        sorted_v = sorted(versions, key=_version_sort_key, reverse=True)
+        assert sorted_v == ["2.0.0", "1.10.0", "1.9.0", "1.2.0"]
+
+    def test_invalid_falls_back(self):
+        assert _version_sort_key("invalid") == (0, 0, 0)
+
+
+class TestModelRegistry:
+    @pytest.fixture
+    def registry(self, tmp_path):
+        return ModelRegistry(registry_dir=str(tmp_path / "models"))
+
+    @pytest.fixture
+    def fake_model(self, tmp_path):
+        model = tmp_path / "best.pt"
+        model.write_bytes(b"\x00" * 1024)  # 1KB dummy
+        return model
+
+    def test_register_new_version(self, registry, fake_model):
+        result = registry.register(fake_model, "1.0.0")
+        assert result is True
+        assert "1.0.0" in registry.index["versions"]
+
+    def test_register_duplicate_without_force_fails(self, registry, fake_model):
+        registry.register(fake_model, "1.0.0")
+        result = registry.register(fake_model, "1.0.0", force=False)
+        assert result is False
+
+    def test_register_duplicate_with_force_succeeds(self, registry, fake_model):
+        registry.register(fake_model, "1.0.0")
+        result = registry.register(fake_model, "1.0.0", force=True)
+        assert result is True
+
+    def test_register_nonexistent_model_fails(self, registry, tmp_path):
+        result = registry.register(tmp_path / "nonexistent.pt", "1.0.0")
+        assert result is False
+
+    def test_list_versions_sorted_semantically(self, registry, fake_model):
+        for v in ["1.0.0", "1.10.0", "1.2.0", "2.0.0"]:
+            registry.register(fake_model, v, force=True)
+
+        versions = registry.list_versions()
+        version_strs = [v["version"] for v in versions]
+        assert version_strs == ["2.0.0", "1.10.0", "1.2.0", "1.0.0"]
+
+    def test_list_versions_filter_by_status(self, registry, fake_model):
+        registry.register(fake_model, "1.0.0")
+        registry.register(fake_model, "2.0.0", force=True)
+        registry.promote("2.0.0", "production")
+
+        testing = registry.list_versions(status="testing")
+        production = registry.list_versions(status="production")
+        assert len(testing) == 1
+        assert testing[0]["version"] == "1.0.0"
+        assert len(production) == 1
+        assert production[0]["version"] == "2.0.0"
+
+    def test_promote_to_production(self, registry, fake_model):
+        registry.register(fake_model, "1.0.0")
+        result = registry.promote("1.0.0", "production")
+        assert result is True
+        assert registry.index["production"] == "1.0.0"
+        assert registry.index["versions"]["1.0.0"]["status"] == "production"
+
+    def test_promote_invalid_stage_fails(self, registry, fake_model):
+        registry.register(fake_model, "1.0.0")
+        result = registry.promote("1.0.0", "invalid_stage")
+        assert result is False
+
+    def test_promote_missing_version_fails(self, registry):
+        result = registry.promote("99.0.0", "production")
+        assert result is False
+
+    def test_rollback(self, registry, fake_model):
+        registry.register(fake_model, "1.0.0")
+        registry.register(fake_model, "2.0.0", force=True)
+        registry.promote("2.0.0", "production")
+
+        result = registry.rollback("1.0.0")
+        assert result is True
+        assert registry.index["production"] == "1.0.0"
+
+    def test_rollback_same_version_fails(self, registry, fake_model):
+        registry.register(fake_model, "1.0.0")
+        registry.promote("1.0.0", "production")
+        result = registry.rollback("1.0.0")
+        assert result is False
+
+    def test_persistence(self, tmp_path, fake_model):
+        """Registry should survive re-instantiation."""
+        reg_dir = str(tmp_path / "models")
+
+        reg1 = ModelRegistry(registry_dir=reg_dir)
+        reg1.register(fake_model, "1.0.0")
+
+        reg2 = ModelRegistry(registry_dir=reg_dir)
+        assert "1.0.0" in reg2.index["versions"]
+
+    def test_metrics_loaded_from_metrics_json(self, tmp_path):
+        """If no metrics kwarg, registry should load from metrics.json."""
+        # Setup: create a model in a typical YOLO output structure
+        weights_dir = tmp_path / "runs" / "train" / "exp" / "weights"
+        weights_dir.mkdir(parents=True)
+        model = weights_dir / "best.pt"
+        model.write_bytes(b"\x00" * 2048)
+
+        metrics_file = weights_dir.parent / "metrics.json"
+        metrics_file.write_text(json.dumps({"map50": 0.87, "map50_95": 0.65}))
+
+        reg = ModelRegistry(registry_dir=str(tmp_path / "models"))
+        reg.register(model, "1.0.0")
+
+        stored = reg.index["versions"]["1.0.0"]
+        assert stored["metrics"]["map50"] == 0.87
 
 
 ======= FILE: docs/QUICKSTART.md =======
@@ -2304,6 +3182,57 @@ The project successfully stepped beyond clean lab data by natively implementing 
 With field data successfully integrated, future steps involve heavily augmenting this incoming data via advanced domain randomization (synthetic shadows, dynamic blur, background removal/swapping) natively into the dataloader to completely decouple the model from relying on clean background features.
 
 
+======= FILE: docs/wiki/09_latest_pipeline_run.md =======
+
+# Latest Pipeline Run Results
+
+The following are the results of the latest end-to-end execution of `plantvillage_pipeline.py`.
+
+```text
+================================================================================
+🌿  PlantVillage End-to-End Pipeline
+================================================================================
+
+[... Environment Validation & Training Skipped (Already Completed) ...]
+
+================================================================================
+📦  STARTING EXPORT PHASE
+================================================================================
+
+✅ Found trained weights: runs/train/domain_resilient_exp/weights/best.pt
+
+🚀 Starting Export...
+🔄 Exporting to COREML...
+   Attempt 1: Exporting INT8 (Linear Quantization)...
+   ✅ INT8 Export successful: runs/train/domain_resilient_exp/weights/best.mlpackage
+✅ CoreML export succeeded at INT8 precision
+✅ Exported to: runs/train/domain_resilient_exp/weights/best.mlpackage
+
+📊 Validating PyTorch Model (Baseline) on CPU...
+   PyTorch mAP@50:    0.4647
+   PyTorch mAP@50-95: 0.4013
+
+📊 Validating CoreML Model (Quantized)...
+   CoreML mAP@50:     0.4875
+   CoreML mAP@50-95:  0.3973
+
+⚖️  Comparison Results:
+   mAP@50 Drop:       -2.28%
+   mAP@50-95 Drop:    0.40%
+   ✅ Quantization successful! Accuracy drop is minimal.
+
+================================================================================
+✅  PIPELINE COMPLETION SUMMARY
+================================================================================
+
+✅ Trained Model:   runs/train/domain_resilient_exp/weights/best.pt
+✅ Exported Model:  runs/train/domain_resilient_exp/weights/best.mlpackage
+📊 Training Logs:   runs/train/domain_resilient_exp/results.csv
+
+📂 All results in:  runs/train/domain_resilient_exp
+```
+
+
 ======= FILE: docs/wiki/README.md =======
 
 # PlantVillage Disease Detection Wiki
@@ -2653,133 +3582,158 @@ except Exception as e:
 
 ======= FILE: src/export.py =======
 
+#!/usr/bin/env python3
+"""
+export.py — Export Entry Point
+
+Exports the best trained model to CoreML (and optionally ONNX/TFLite),
+validates accuracy against the PyTorch baseline, and reports quantization impact.
+"""
+
 import sys
-import shutil
-import re
+import logging
 from pathlib import Path
-import yaml
 from ultralytics import YOLO
 
-# Add src to path
-sys.path.append(str(Path.cwd() / 'src'))
+# Stable import path — works regardless of cwd
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from leafmd.core.config import PipelineConfig
 from leafmd.core.exporter import ModelExporter
+from leafmd.core.environment import EnvironmentValidator
 
-def parse_map(output):
-    """Parse mAP50 and mAP50-95 from YOLO validation output"""
-    # Look for the line starting with "all"
-    # Class     Images  Instances      Box(P          R      mAP50  mAP50-95)
-    # all        128        929      0.916      0.852      0.923      0.722
-    match = re.search(r'all\s+\d+\s+\d+\s+[\d.]+\s+[\d.]+\s+([\d.]+)\s+([\d.]+)', output)
-    if match:
-        return float(match.group(1)), float(match.group(2))
-    return 0.0, 0.0
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("export")
 
-def main():
-    # 0. Load Configuration
-    config_path = Path('config/config.yaml')
-    if not config_path.exists():
-        print(f"❌ Configuration not found at {config_path}")
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+
+
+def _resolve_data_yaml(cfg: PipelineConfig) -> Path:
+    """
+    Resolve the data.yaml path from config, with fallback search.
+
+    Prefers the config-specified cache_dir, then searches ./data/ recursively.
+    """
+    primary = cfg.data_yaml_path
+    if primary.exists():
+        return primary
+
+    # Fallback: search in common locations
+    for search_root in [Path("data"), Path("datasets")]:
+        if search_root.exists():
+            found = list(search_root.rglob("data.yaml"))
+            if found:
+                logger.warning(
+                    f"⚠️  data.yaml not at {primary}, using fallback: {found[0]}"
+                )
+                return found[0]
+
+    logger.warning(
+        f"⚠️  data.yaml not found at {primary} or in data/datasets/ directories. "
+        "Export may fail if dataset info is required."
+    )
+    return primary  # return the expected path anyway; let downstream fail clearly
+
+
+def main() -> int:
+    # ── 0. Load Configuration ─────────────────
+    if not CONFIG_PATH.exists():
+        print(f"❌ Configuration not found at {CONFIG_PATH}")
         return 1
-    
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-        
-    train_config = config.get('training', {})
-    export_config = config.get('export', {})
-    dataset_config = config.get('dataset', {})
-    
-    project = train_config.get('project', 'runs/train')
-    name = train_config.get('name', 'exp')
-    
-    # Construct dynamic path to best.pt
-    trained_weights = Path(project) / name / 'weights' / 'best.pt'
-    
-    # Allow overriding via CLI if needed (simple check)
-    if len(sys.argv) > 1 and sys.argv[1].endswith('.pt'):
-         trained_weights = Path(sys.argv[1])
-         
+
+    cfg = PipelineConfig.from_yaml(CONFIG_PATH)
+
+    # ── 0b. Resolve trained weights ───────────
+    trained_weights = cfg.best_weights_path
+
+    # Allow CLI override: python export.py /path/to/best.pt
+    if len(sys.argv) > 1 and sys.argv[1].endswith(".pt"):
+        trained_weights = Path(sys.argv[1])
+
     if not trained_weights.exists():
         print(f"❌ Error: Trained weights not found at {trained_weights}")
         return 1
-    
+
     print(f"✅ Found trained weights: {trained_weights}")
-    
-    # 1. Export
+
+    # ── 0c. Resolve data.yaml ─────────────────
+    data_yaml_path = _resolve_data_yaml(cfg)
+
+    # ── 1. Export ─────────────────────────────
     print("\n🚀 Starting Export...")
-    # Get cache dir from config or default
-    data_yaml_path = Path(dataset_config.get('cache_dir', 'data')) / 'data.yaml'
-    
-    # If data.yaml doesn't exist there, try to find it (dataset might be elsewhere)
-    if not data_yaml_path.exists():
-         # Fallback to recursively searching in data dir
-         data_dir = Path('data')
-         found = list(data_dir.rglob('data.yaml'))
-         if found:
-             data_yaml_path = found[0]
-         else:
-             print("⚠️  Warning: data.yaml not found, export might fail if it needs dataset info.")
-    
     exporter = ModelExporter(trained_weights, data_yaml_path)
-    
-    # Use config for export settings if available
-    int8_export = export_config.get('int8', True)
-    formats = export_config.get('formats', ['coreml'])
-    
-    exported_paths = exporter.export(formats=formats, int8=int8_export)
-    
-    coreml_path = exported_paths.get('coreml')
-    if 'coreml' in formats and not coreml_path:
+
+    exported_paths = exporter.export(
+        formats=cfg.export.formats,
+        int8=cfg.export.int8,
+    )
+
+    coreml_path = exported_paths.get("coreml")
+    if "coreml" in cfg.export.formats and not coreml_path:
         print("❌ CoreML Export failed")
-        # Proceed if other formats succeeded? 
-        # For now, let's treat it as main goal.
         if not any(exported_paths.values()):
-             return 1
-    
+            return 1
+
     if coreml_path:
         print(f"✅ Exported to: {coreml_path}")
-    
-    # 2. Validate PyTorch (Baseline)
-    print("\n📊 Validating PyTorch Model (Baseline)...")
+
+    # ── 2. Validate PyTorch (Baseline) ────────
+    # CRITICAL: Always validate on CPU to avoid MPS NMS corruption
+    val_device = EnvironmentValidator.get_validation_device(cfg.train.device)
+    val_split = cfg.validation.split
+
+    print(f"\n📊 Validating PyTorch Model (Baseline) on {val_device.upper()}...")
     model_pt = YOLO(str(trained_weights))
-    metrics_pt = model_pt.val(data='data/data.yaml', split='test', device='mps')
+    metrics_pt = model_pt.val(
+        data=str(data_yaml_path),
+        split=val_split,
+        device=val_device,
+    )
     map50_pt = metrics_pt.box.map50
     map50_95_pt = metrics_pt.box.map
     print(f"   PyTorch mAP@50:    {map50_pt:.4f}")
     print(f"   PyTorch mAP@50-95: {map50_95_pt:.4f}")
-    
-    # 3. Validate CoreML (Quantized)
+
+    # ── 3. Validate CoreML (Quantized) ────────
+    if not coreml_path:
+        print("\n⚠️  Skipping CoreML validation (export failed or not requested)")
+        return 0
+
     print("\n📊 Validating CoreML Model (Quantized)...")
-    # Note: Ultralytics val() on CoreML model might need device='cpu' if 'mps' causes issues with CoreML
-    # But let's try 'mps' as that's where we want it to run eventually (ANE via CoreML)
-    # Actually validation of CoreML usually runs on CPU via CoreML unless specified
     try:
         model_coreml = YOLO(str(coreml_path))
-        metrics_coreml = model_coreml.val(data='data/data.yaml', split='test', imgsz=640)
+        metrics_coreml = model_coreml.val(
+            data=str(data_yaml_path),
+            split=val_split,
+            imgsz=640,
+        )
         map50_coreml = metrics_coreml.box.map50
         map50_95_coreml = metrics_coreml.box.map
         print(f"   CoreML mAP@50:     {map50_coreml:.4f}")
         print(f"   CoreML mAP@50-95:  {map50_95_coreml:.4f}")
-        
-        # 4. Compare
+
+        # ── 4. Compare ────────────────────────
+        drop_50 = map50_pt - map50_coreml
+        drop_95 = map50_95_pt - map50_95_coreml
+
         print("\n⚖️  Comparison Results:")
-        print(f"   mAP@50 Drop:       {(map50_pt - map50_coreml) * 100:.2f}%")
-        print(f"   mAP@50-95 Drop:    {(map50_95_pt - map50_95_coreml) * 100:.2f}%")
-        
-        if (map50_pt - map50_coreml) < 0.05:
+        print(f"   mAP@50 Drop:       {drop_50 * 100:.2f}%")
+        print(f"   mAP@50-95 Drop:    {drop_95 * 100:.2f}%")
+
+        if drop_50 < 0.05:
             print("   ✅ Quantization successful! Accuracy drop is minimal.")
         else:
             print("   ⚠️  Warning: Significant accuracy drop detected.")
-            
+
         return 0
-            
+
     except Exception as e:
         print(f"❌ Validation of CoreML model failed: {e}")
         return 1
 
-if __name__ == '__main__':
-    sys.exit(main())
 
+if __name__ == "__main__":
+    sys.exit(main())
 
 ======= FILE: src/inspect_config.py =======
 
@@ -2877,111 +3831,76 @@ except Exception as e:
 
 #!/usr/bin/env python3
 """
-train.py - Training Entry Point
-Loads configuration from config/config.yaml and starts training.
+train.py — Training Entry Point
+
+Loads configuration from config/config.yaml via the centralized PipelineConfig
+and starts training.
 """
 
 import sys
-import yaml
 import logging
 from pathlib import Path
 
-# Add src to path to allow imports
-sys.path.append(str(Path(__file__).parent))
+# Stable import path — works regardless of cwd
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from leafmd.core.config import PipelineConfig
 from leafmd.core.trainer import ModelTrainer
 from leafmd.core.environment import EnvironmentValidator
 from leafmd.core.dataset import DatasetLoader
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('train')
+logger = logging.getLogger("train")
 
-def main():
-    # 1. Load Configuration
-    config_path = Path('config/config.yaml')
-    if not config_path.exists():
-        logger.error(f"❌ Configuration not found at {config_path}")
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+
+
+def main() -> int:
+    # ── 1. Load Configuration ─────────────────
+    if not CONFIG_PATH.exists():
+        logger.error(f"❌ Configuration not found at {CONFIG_PATH}")
         return 1
-    
-    with open(config_path) as f:
-        full_config = yaml.safe_load(f)
-    
-    train_config = full_config.get('training', {})
-    dataset_config = full_config.get('dataset', {})
-    
-    # 2. Validate Environment
+
+    cfg = PipelineConfig.from_yaml(CONFIG_PATH)
+    logger.info(f"   Loaded config from {CONFIG_PATH}")
+
+    # ── 2. Apply monitoring env vars ──────────
+    cfg.monitoring.apply_env_vars()
+
+    # ── 3. Validate Environment ───────────────
     logger.info("🔍 Validating environment...")
-    EnvironmentValidator.validate()
-    
-    # 3. Load/Prepare Dataset
+    is_valid, device, _ = EnvironmentValidator.validate()
+
+    # Override device from env if auto-detected
+    if cfg.train.device == "auto":
+        cfg.train.device = device
+    else:
+        device = cfg.train.device
+
+    # ── 4. Load / Prepare Dataset ─────────────
     logger.info("📦 Preparing dataset...")
-    # DatasetLoader expects cache_dir from args usually, but we take from config
-    cache_dir = dataset_config.get('cache_dir', '../data')
-    loader = DatasetLoader(cache_dir=cache_dir)
-    
-    # Ensure dataset is ready and get data.yaml path
-    # The loader.load() method might need args or implicitly use cache
-    # In cli.py it was loader.load()
+    loader = DatasetLoader(cache_dir=cfg.dataset.cache_dir)
     data_yaml_path = loader.load()
-    
+
     if not data_yaml_path:
         logger.error("❌ Failed to load dataset configuration")
         return 1
-    
-    # Verify data.yaml path matches what's used in config or is valid
+
     logger.info(f"   Dataset YAML: {data_yaml_path}")
-    
-    # 4. Configure Trainer
-    model_name = train_config.get('model', 'yolo26n')
-    device = train_config.get('device', 'auto')
-    
-    # Construct config params for YOLO.train()
-    # Map config.yaml keys to YOLO arguments
-    yolo_config = {
-        'epochs': train_config.get('epochs', 50),
-        'batch': train_config.get('batch_size', 16),
-        'imgsz': train_config.get('image_size', 640),
-        'optimizer': train_config.get('optimizer', 'auto'),
-        'lr0': train_config.get('learning_rate'), # YOLO uses lr0
-        'momentum': train_config.get('momentum', 0.937),
-        'weight_decay': train_config.get('weight_decay', 0.0005),
-        'patience': train_config.get('patience', 10),
-        'amp': train_config.get('amp', True),
-        'amp': train_config.get('amp', True),
-        'project': str(Path(train_config.get('project', 'runs/train')).absolute()),
-        'name': train_config.get('name', 'exp'),
-        'exist_ok': train_config.get('exist_ok', False),
-        'resume': train_config.get('resume', False),
-        'workers': train_config.get('workers', 1),
-    }
-    
-    # Add augmentation if present
-    if 'augmentation' in full_config:
-        aug_config = full_config['augmentation']
-        # Filter out keys not supported by YOLO train() directly
-        valid_aug_keys = [
-            'hsv_h', 'hsv_s', 'hsv_v', 'degrees', 'translate', 'scale', 'shear', 
-            'perspective', 'flipud', 'fliplr', 'mosaic', 'mixup', 'copy_paste',
-            'auto_augment', 'erasing', 'crop_fraction'
-        ]
-        filtered_aug = {k: v for k, v in aug_config.items() if k in valid_aug_keys}
-        yolo_config.update(filtered_aug)
-        
-    # Remove None values
-    yolo_config = {k: v for k, v in yolo_config.items() if v is not None}
-    
-    # Print config for debug
-    logger.info(f"   YOLO Config: {yolo_config}")
-    
-    # 5. Initialize Trainer
+
+    # ── 5. Build YOLO kwargs ──────────────────
+    yolo_kwargs = cfg.train.to_yolo_kwargs()
+    logger.info(f"   YOLO Config: {yolo_kwargs}")
+
+    # ── 6. Initialize Trainer ─────────────────
     trainer = ModelTrainer(
-        model_name=model_name,
+        model_name=cfg.train.model,
         data_yaml=data_yaml_path,
         device=device,
-        config=yolo_config
+        config=yolo_kwargs,
     )
-    
-    # 6. Start Training
+
+    # ── 7. Train ──────────────────────────────
     try:
         best_model = trainer.train()
         if best_model:
@@ -2994,9 +3913,9 @@ def main():
         logger.critical(f"❌ Unhandled exception during training: {e}")
         return 1
 
-if __name__ == '__main__':
-    sys.exit(main())
 
+if __name__ == "__main__":
+    sys.exit(main())
 
 ======= FILE: src/verify_fix.py =======
 
@@ -3041,19 +3960,25 @@ print("\n✅ Verification passed: Code structure implements correct quantization
 
 ======= FILE: src/leafmd/cli.py =======
 
+#!/usr/bin/env python3
+"""
+cli.py — LeafMD Command-Line Interface
+
+Central entry point for all pipeline operations: train, export, download,
+check, compare, and registry management.
+"""
 
 import argparse
 import sys
 import logging
-from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv(Path(__file__).parents[2] / '.env')
-
+load_dotenv(Path(__file__).parents[2] / ".env")
 
 # Core modules
+from leafmd.core.config import PipelineConfig
 from leafmd.core.environment import EnvironmentValidator
 from leafmd.core.dataset import DatasetLoader
 from leafmd.core.trainer import ModelTrainer
@@ -3066,172 +3991,233 @@ from leafmd.tools.registry import ModelRegistry
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
-logger = logging.getLogger('leafmd')
+logger = logging.getLogger("leafmd")
+
+# Default config path (relative to project root)
+DEFAULT_CONFIG = Path(__file__).parents[2] / "config" / "config.yaml"
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description='LeafMD: Plant Disease Detection Pipeline',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description="LeafMD: Plant Disease Detection Pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    
-    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
-    
+
+    # Global option
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG),
+        help=f"Path to config.yaml (default: {DEFAULT_CONFIG})",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+
     # ==========================================
     # PIPELINE COMMANDS
     # ==========================================
-    
+
     # Train
-    train_parser = subparsers.add_parser('train', help='Train a model')
-    train_parser.add_argument('--model', default='yolo26n', help='Model architecture')
-    train_parser.add_argument('--epochs', type=int, default=20, help='Training epochs')
-    train_parser.add_argument('--batch', type=int, default=16, help='Batch size')
-    train_parser.add_argument('--imgsz', type=int, default=640, help='Image size')
-    train_parser.add_argument('--device', default='auto', help='Device (mps/cpu/auto)')
-    train_parser.add_argument('--cache-dir', default='../data', help='Dataset cache directory')
-    train_parser.add_argument('--project', default='runs/train', help='Project directory')
-    train_parser.add_argument('--name', default='exp', help='Experiment name')
-    
+    train_parser = subparsers.add_parser("train", help="Train a model")
+    train_parser.add_argument("--model", default=None, help="Model architecture (overrides config)")
+    train_parser.add_argument("--epochs", type=int, default=None, help="Training epochs (overrides config)")
+    train_parser.add_argument("--batch", type=int, default=None, help="Batch size (overrides config)")
+    train_parser.add_argument("--imgsz", type=int, default=None, help="Image size (overrides config)")
+    train_parser.add_argument("--device", default=None, help="Device (mps/cpu/auto, overrides config)")
+    train_parser.add_argument("--cache-dir", default=None, help="Dataset cache directory (overrides config)")
+    train_parser.add_argument("--project", default=None, help="Project directory (overrides config)")
+    train_parser.add_argument("--name", default=None, help="Experiment name (overrides config)")
+
     # Export
-    export_parser = subparsers.add_parser('export', help='Export a trained model')
-    export_parser.add_argument('--model', required=True, help='Path to .pt model')
-    export_parser.add_argument('--data', help='Path to data.yaml (optional if cached)')
-    export_parser.add_argument('--formats', nargs='+', default=['coreml'], choices=['coreml', 'onnx', 'tflite'])
-    export_parser.add_argument('--no-int8', action='store_true', help='Disable INT8 quantization')
-    
+    export_parser = subparsers.add_parser("export", help="Export a trained model")
+    export_parser.add_argument("--model", required=True, help="Path to .pt model")
+    export_parser.add_argument("--data", help="Path to data.yaml (optional if cached)")
+    export_parser.add_argument(
+        "--formats",
+        nargs="+",
+        default=None,
+        choices=["coreml", "onnx", "tflite"],
+        help="Export formats (overrides config)",
+    )
+    export_parser.add_argument("--no-int8", action="store_true", help="Disable INT8 quantization")
+
     # Download
-    download_parser = subparsers.add_parser('download', help='Download dataset')
-    download_parser.add_argument('--cache-dir', default='./data', help='Dataset cache directory')
-    
+    download_parser = subparsers.add_parser("download", help="Download dataset")
+    download_parser.add_argument("--cache-dir", default=None, help="Dataset cache directory")
+
     # Check
-    check_parser = subparsers.add_parser('check', help='Check system environment')
-    
+    subparsers.add_parser("check", help="Check system environment")
+
     # ==========================================
     # TOOL COMMANDS
     # ==========================================
-    
+
     # Compare
-    compare_parser = subparsers.add_parser('compare', help='Compare multiple models')
-    compare_parser.add_argument('--models', nargs='+', default=['yolo11n', 'yolo26n'], help='Models to compare')
-    compare_parser.add_argument('--epochs', type=int, default=10, help='Epochs per model')
-    compare_parser.add_argument('--data', required=True, help='Path to data.yaml')
-    
+    compare_parser = subparsers.add_parser("compare", help="Compare multiple models")
+    compare_parser.add_argument(
+        "--models", nargs="+", default=["yolo11n", "yolo26n"], help="Models to compare"
+    )
+    compare_parser.add_argument("--epochs", type=int, default=10, help="Epochs per model")
+    compare_parser.add_argument("--data", required=True, help="Path to data.yaml")
+
     # Registry
-    registry_parser = subparsers.add_parser('registry', help='Manage model registry')
-    registry_sub = registry_parser.add_subparsers(dest='reg_action')
-    
-    reg_list = registry_sub.add_parser('list', help='List versions')
-    reg_list.add_argument('--status', help='Filter by status')
-    
-    reg_register = registry_sub.add_parser('register', help='Register version')
-    reg_register.add_argument('--model', required=True, help='Path to model')
-    reg_register.add_argument('--version', required=True, help='Version string')
-    
+    registry_parser = subparsers.add_parser("registry", help="Manage model registry")
+    registry_sub = registry_parser.add_subparsers(dest="reg_action")
+
+    reg_list = registry_sub.add_parser("list", help="List versions")
+    reg_list.add_argument("--status", help="Filter by status")
+
+    reg_register = registry_sub.add_parser("register", help="Register version")
+    reg_register.add_argument("--model", required=True, help="Path to model")
+    reg_register.add_argument("--version", required=True, help="Version string")
+    reg_register.add_argument("--force", action="store_true", help="Overwrite existing version")
+
+    reg_promote = registry_sub.add_parser("promote", help="Promote a version")
+    reg_promote.add_argument("--version", required=True, help="Version to promote")
+    reg_promote.add_argument("--to", default="production", choices=["testing", "staging", "production"])
+
+    reg_rollback = registry_sub.add_parser("rollback", help="Rollback production")
+    reg_rollback.add_argument("--version", required=True, help="Version to roll back to")
+
     args = parser.parse_args()
-    
+
     if not args.command:
         parser.print_help()
         return 1
-    
+
+    # ── Load config ───────────────────────────
+    config_path = Path(args.config)
+    cfg = PipelineConfig.from_yaml(config_path)
+
     # ------------------------------------------
     # EXECUTION
     # ------------------------------------------
-    
+
     # Check
-    if args.command == 'check':
+    if args.command == "check":
         EnvironmentValidator.validate()
         return 0
-    
+
     # Download
-    if args.command == 'download':
-        loader = DatasetLoader(cache_dir=args.cache_dir)
+    if args.command == "download":
+        cache_dir = args.cache_dir or cfg.dataset.cache_dir
+        loader = DatasetLoader(cache_dir=cache_dir)
         loader.load()
         return 0
-    
+
     # Train
-    if args.command == 'train':
+    if args.command == "train":
         # Validate env first
-        is_valid, device, _ = EnvironmentValidator.validate()
+        is_valid, detected_device, _ = EnvironmentValidator.validate()
         if not is_valid:
             return 1
-        
-        if args.device != 'auto':
-            device = args.device
-            
+
+        # Apply CLI overrides to config
+        if args.model:
+            cfg.train.model = args.model
+        if args.epochs is not None:
+            cfg.train.epochs = args.epochs
+        if args.batch is not None:
+            cfg.train.batch = args.batch
+        if args.imgsz is not None:
+            cfg.train.imgsz = args.imgsz
+        if args.project:
+            cfg.train.project = args.project
+        if args.name:
+            cfg.train.name = args.name
+
+        # Device resolution
+        device = args.device or cfg.train.device
+        if device == "auto":
+            device = detected_device
+
+        # Apply monitoring env vars
+        cfg.monitoring.apply_env_vars()
+
         # Load dataset
-        loader = DatasetLoader(cache_dir=args.cache_dir)
+        cache_dir = args.cache_dir or cfg.dataset.cache_dir
+        loader = DatasetLoader(cache_dir=cache_dir)
         data_yaml = loader.load()
         if not data_yaml:
             return 1
-            
-        # Train
-        config = {
-            'epochs': args.epochs,
-            'batch': args.batch,
-            'imgsz': args.imgsz,
-            'project': args.project,
-            'name': args.name,
-            'exist_ok': True
-        }
-        
+
+        # Build YOLO kwargs
+        yolo_kwargs = cfg.train.to_yolo_kwargs()
+
         trainer = ModelTrainer(
-            model_name=args.model,
+            model_name=cfg.train.model,
             data_yaml=data_yaml,
             device=device,
-            config=config
+            config=yolo_kwargs,
         )
         trainer.train()
         return 0
-    
+
     # Export
-    if args.command == 'export':
+    if args.command == "export":
         # Resolve data.yaml
         if args.data:
             data_yaml = Path(args.data)
         else:
-            loader = DatasetLoader()
+            cache_dir = cfg.dataset.cache_dir
+            loader = DatasetLoader(cache_dir=cache_dir)
             data_yaml = loader._use_cached()
             if not data_yaml:
                 print("❌ Error: Could not find data.yaml. Please specify --data")
                 return 1
-        
+
+        formats = args.formats or cfg.export.formats
+        int8 = not args.no_int8 and cfg.export.int8
+
         exporter = ModelExporter(Path(args.model), data_yaml)
-        exporter.export(
-            formats=args.formats,
-            int8=not args.no_int8
-        )
+        exporter.export(formats=formats, int8=int8)
         return 0
-        
+
     # Compare
-    if args.command == 'compare':
+    if args.command == "compare":
         comp = ModelComparator(data_yaml=args.data)
         comp.run_comparison(models=args.models, epochs=args.epochs)
         return 0
-        
+
     # Registry
-    if args.command == 'registry':
+    if args.command == "registry":
         reg = ModelRegistry()
-        if args.reg_action == 'list':
+
+        if args.reg_action == "list":
             versions = reg.list_versions(args.status)
             reg.print_table(versions)
-        elif args.reg_action == 'register':
-            reg.register(Path(args.model), args.version)
+
+        elif args.reg_action == "register":
+            reg.register(
+                Path(args.model),
+                args.version,
+                force=args.force,
+            )
+
+        elif args.reg_action == "promote":
+            reg.promote(args.version, args.to)
+
+        elif args.reg_action == "rollback":
+            reg.rollback(args.version)
+
+        else:
+            registry_parser.print_help()
+
         return 0
 
-if __name__ == '__main__':
-    sys.exit(main())
+    return 0
 
+
+if __name__ == "__main__":
+    sys.exit(main())
 
 ======= FILE: src/leafmd/tools/__init__.py =======
 
 
 
 ======= FILE: src/leafmd/tools/comparison.py =======
-
 
 import json
 import time
@@ -3242,50 +4228,57 @@ from typing import Dict, List
 import torch
 from ultralytics import YOLO
 
+from leafmd.core.environment import EnvironmentValidator
+
 logger = logging.getLogger(__name__)
 
+
 class ModelComparator:
-    """Compare multiple YOLO models on same dataset"""
-    
-    def __init__(self, data_yaml: str, output_dir: str = './model_comparison'):
+    """Compare multiple YOLO models on same dataset."""
+
+    def __init__(self, data_yaml: str, output_dir: str = "./model_comparison"):
         self.data_yaml = data_yaml
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
-        self.results = []
-    
+        self.results: List[Dict] = []
+
     def benchmark_model(
         self,
         model_name: str,
         epochs: int = 10,
         batch: int = 16,
-        device: str = 'auto'
+        device: str = "auto",
     ) -> Dict:
         """
-        Train and evaluate a single model
-        
+        Train and evaluate a single model.
+
         Args:
-            model_name: Model architecture (e.g., 'yolo26n')
-            epochs: Number of training epochs
-            batch: Batch size
-            device: Training device
-            
+            model_name: Model architecture (e.g., 'yolo26n').
+            epochs:     Number of training epochs.
+            batch:      Batch size.
+            device:     Training device.
+
         Returns:
-            Dictionary with benchmark results
+            Dictionary with benchmark results, or None on failure.
         """
-        logger.info("="*70)
+        logger.info("=" * 70)
         logger.info(f"BENCHMARKING: {model_name}")
-        logger.info("="*70 + "\n")
-        
+        logger.info("=" * 70 + "\n")
+
         # Auto-detect device
-        if device == 'auto':
-            device = 'mps' if torch.backends.mps.is_available() else 'cpu'
-        
-        model = YOLO(f'{model_name}.pt')
-        
+        if device == "auto":
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+
+        # MPS-safe workers
+        safe_workers = EnvironmentValidator.get_safe_worker_count(device)
+        val_device = EnvironmentValidator.get_validation_device(device)
+
+        model = YOLO(f"{model_name}.pt")
+
         # Training
         logger.info(f"🏋️  Training {model_name} for {epochs} epochs...")
         start_time = time.time()
-        
+
         try:
             results = model.train(
                 data=self.data_yaml,
@@ -3293,54 +4286,56 @@ class ModelComparator:
                 imgsz=640,
                 batch=batch,
                 device=device,
-                optimizer='auto',
-                workers=1,
+                optimizer="auto",
+                workers=safe_workers,
                 val=False,
                 plots=False,
                 project=str(self.output_dir),
                 name=model_name,
                 exist_ok=True,
-                verbose=False
+                verbose=False,
             )
-            
+
             training_time = time.time() - start_time
-            
-            # Validation on CPU (avoid MPS bugs)
-            logger.info(f"📊 Validating {model_name}...")
-            metrics = model.val(device='cpu', split='test', verbose=False)
-            
+
+            # Validation on safe device (CPU for MPS)
+            logger.info(f"📊 Validating {model_name} on {val_device.upper()}...")
+            metrics = model.val(device=val_device, split="test", verbose=False)
+
             # Inference speed test
-            logger.info(f"⚡ Testing inference speed...")
+            logger.info("⚡ Testing inference speed...")
             inference_times = []
             test_img = torch.randn(1, 3, 640, 640)
-            
+
             # Warmup
             for _ in range(3):
-                _ = model.predict(test_img, device='cpu', verbose=False)
-            
+                _ = model.predict(test_img, device="cpu", verbose=False)
+
             # Actual measurement
             for _ in range(10):
                 start = time.time()
-                _ = model.predict(test_img, device='cpu', verbose=False)
+                _ = model.predict(test_img, device="cpu", verbose=False)
                 inference_times.append(time.time() - start)
-            
-            avg_inference = sum(inference_times) / len(inference_times) * 1000  # ms
-            
+
+            avg_inference = (
+                sum(inference_times) / len(inference_times) * 1000
+            )  # ms
+
             result = {
-                'model': model_name,
-                'epochs_trained': epochs,
-                'map50': float(metrics.box.map50),
-                'map50_95': float(metrics.box.map),
-                'precision': float(metrics.box.p),
-                'recall': float(metrics.box.r),
-                'training_time_min': training_time / 60,
-                'inference_ms': avg_inference,
-                'device': device,
-                'batch_size': batch
+                "model": model_name,
+                "epochs_trained": epochs,
+                "map50": float(metrics.box.map50),
+                "map50_95": float(metrics.box.map),
+                "precision": float(metrics.box.p),
+                "recall": float(metrics.box.r),
+                "training_time_min": training_time / 60,
+                "inference_ms": avg_inference,
+                "device": device,
+                "batch_size": batch,
             }
-            
+
             self.results.append(result)
-            
+
             logger.info(f"\n📊 {model_name} Results:")
             logger.info(f"   mAP@50:     {result['map50']:.4f}")
             logger.info(f"   mAP@50-95:  {result['map50_95']:.4f}")
@@ -3349,401 +4344,694 @@ class ModelComparator:
             logger.info(f"   Train Time: {result['training_time_min']:.1f} min")
             logger.info(f"   Inference:  {result['inference_ms']:.1f} ms")
             logger.info("")
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"❌ {model_name} benchmark failed: {e}")
             import traceback
+
             logger.error(traceback.format_exc())
             return None
-    
+
     def run_comparison(
         self,
         models: List[str],
         epochs: int = 10,
         batch: int = 16,
-        device: str = 'auto'
+        device: str = "auto",
     ):
         """
-        Run full comparison across multiple models
-        
+        Run full comparison across multiple models.
+
         Args:
-            models: List of model names to compare
-            epochs: Training epochs per model
-            batch: Batch size
-            device: Training device
+            models: List of model names to compare.
+            epochs: Training epochs per model.
+            batch:  Batch size.
+            device: Training device.
         """
-        logger.info("\n" + "="*70)
+        logger.info("\n" + "=" * 70)
         logger.info("MODEL COMPARISON TEST")
-        logger.info("="*70)
+        logger.info("=" * 70)
         logger.info(f"Models: {', '.join(models)}")
         logger.info(f"Epochs per model: {epochs}")
-        logger.info(f"Device: {device if device != 'auto' else 'auto-detect'}")
+        logger.info(
+            f"Device: {device if device != 'auto' else 'auto-detect'}"
+        )
         logger.info("")
-        
+
         for model_name in models:
             result = self.benchmark_model(
                 model_name=model_name,
                 epochs=epochs,
                 batch=batch,
-                device=device
+                device=device,
             )
-            
+
             if result is None:
                 logger.warning(f"⚠️  Skipping {model_name} due to errors")
-        
+
         # Generate report
         self.generate_report()
-    
+
     def generate_report(self):
-        """Generate comparison report"""
+        """Generate comparison report."""
         if len(self.results) < 2:
             logger.warning("\n⚠️  Need at least 2 models for comparison")
             if len(self.results) == 1:
                 logger.info(f"Only benchmarked: {self.results[0]['model']}")
             return
-        
+
         df = pd.DataFrame(self.results)
-        
-        logger.info("\n" + "="*70)
+
+        logger.info("\n" + "=" * 70)
         logger.info("COMPARISON REPORT")
-        logger.info("="*70 + "\n")
-        
+        logger.info("=" * 70 + "\n")
+
         # Print table
         print(df.to_string(index=False))
-        
+
         # Analysis
-        logger.info("\n" + "="*70)
+        logger.info("\n" + "=" * 70)
         logger.info("ANALYSIS")
-        logger.info("="*70 + "\n")
-        
-        # Find best model for each metric
-        best_accuracy = df.loc[df['map50_95'].idxmax()]
-        fastest_inference = df.loc[df['inference_ms'].idxmin()]
-        fastest_training = df.loc[df['training_time_min'].idxmin()]
-        
+        logger.info("=" * 70 + "\n")
+
+        best_accuracy = df.loc[df["map50_95"].idxmax()]
+        fastest_inference = df.loc[df["inference_ms"].idxmin()]
+        fastest_training = df.loc[df["training_time_min"].idxmin()]
+
         logger.info("🏆 Best Performance:")
-        logger.info(f"   Accuracy:  {best_accuracy['model']} (mAP@50-95: {best_accuracy['map50_95']:.4f})")
-        logger.info(f"   Inference: {fastest_inference['model']} ({fastest_inference['inference_ms']:.1f} ms)")
-        logger.info(f"   Training:  {fastest_training['model']} ({fastest_training['training_time_min']:.1f} min)")
-        
+        logger.info(
+            f"   Accuracy:  {best_accuracy['model']} "
+            f"(mAP@50-95: {best_accuracy['map50_95']:.4f})"
+        )
+        logger.info(
+            f"   Inference: {fastest_inference['model']} "
+            f"({fastest_inference['inference_ms']:.1f} ms)"
+        )
+        logger.info(
+            f"   Training:  {fastest_training['model']} "
+            f"({fastest_training['training_time_min']:.1f} min)"
+        )
+
         # YOLO26 vs YOLO11 specific comparison
-        yolo11_results = [r for r in self.results if 'yolo11' in r['model']]
-        yolo26_results = [r for r in self.results if 'yolo26' in r['model']]
-        
+        yolo11_results = [r for r in self.results if "yolo11" in r["model"]]
+        yolo26_results = [r for r in self.results if "yolo26" in r["model"]]
+
         if yolo11_results and yolo26_results:
             yolo11 = yolo11_results[0]
             yolo26 = yolo26_results[0]
-            
-            map_diff = (yolo26['map50_95'] - yolo11['map50_95']) / yolo11['map50_95'] * 100
-            speed_diff = (yolo26['inference_ms'] - yolo11['inference_ms']) / yolo11['inference_ms'] * 100
-            
+
+            map_diff = (
+                (yolo26["map50_95"] - yolo11["map50_95"])
+                / yolo11["map50_95"]
+                * 100
+            )
+            speed_diff = (
+                (yolo26["inference_ms"] - yolo11["inference_ms"])
+                / yolo11["inference_ms"]
+                * 100
+            )
+
             logger.info(f"\n📈 YOLO26 vs YOLO11:")
-            logger.info(f"   Accuracy: {map_diff:+.1f}% {'🟢 BETTER' if map_diff > 0 else '🔴 WORSE'}")
-            logger.info(f"   Speed:    {speed_diff:+.1f}% {'🟢 FASTER' if speed_diff < 0 else '🔴 SLOWER'}")
-            
-            # Recommendation
-            logger.info(f"\n💡 RECOMMENDATION:")
-            
+            logger.info(
+                f"   Accuracy: {map_diff:+.1f}% "
+                f"{'🟢 BETTER' if map_diff > 0 else '🔴 WORSE'}"
+            )
+            logger.info(
+                f"   Speed:    {speed_diff:+.1f}% "
+                f"{'🟢 FASTER' if speed_diff < 0 else '🔴 SLOWER'}"
+            )
+
+            logger.info("\n💡 RECOMMENDATION:")
+
             if map_diff > 2 and speed_diff < 10:
-                logger.info("   ✅ Use YOLO26 - Better accuracy, acceptable speed")
+                logger.info(
+                    "   ✅ Use YOLO26 — Better accuracy, acceptable speed"
+                )
                 recommendation = "yolo26"
             elif map_diff < -2:
-                logger.info("   ⚠️  Stick with YOLO11 - YOLO26 is less accurate")
+                logger.info(
+                    "   ⚠️  Stick with YOLO11 — YOLO26 is less accurate"
+                )
                 recommendation = "yolo11"
             elif speed_diff > 20:
-                logger.info("   ⚠️  Stick with YOLO11 - YOLO26 is too slow")
+                logger.info(
+                    "   ⚠️  Stick with YOLO11 — YOLO26 is too slow"
+                )
                 recommendation = "yolo11"
             else:
-                logger.info("   ⚠️  Results are too close. Use YOLO11 (more mature)")
+                logger.info(
+                    "   ⚠️  Results are too close. Use YOLO11 (more mature)"
+                )
                 recommendation = "yolo11"
         else:
-            recommendation = best_accuracy['model']
-        
+            recommendation = best_accuracy["model"]
+
         # Save results
-        csv_path = self.output_dir / 'comparison_results.csv'
+        csv_path = self.output_dir / "comparison_results.csv"
         df.to_csv(csv_path, index=False)
-        
-        json_path = self.output_dir / 'comparison_results.json'
-        with open(json_path, 'w') as f:
-            json.dump({
-                'results': self.results,
-                'recommendation': recommendation,
-                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-            }, f, indent=2)
-        
+
+        json_path = self.output_dir / "comparison_results.json"
+        with open(json_path, "w") as f:
+            json.dump(
+                {
+                    "results": self.results,
+                    "recommendation": recommendation,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+                f,
+                indent=2,
+            )
+
         logger.info(f"\n💾 Results saved:")
         logger.info(f"   CSV:  {csv_path}")
         logger.info(f"   JSON: {json_path}")
         logger.info("")
 
-
 ======= FILE: src/leafmd/tools/registry.py =======
-
 
 import json
 import shutil
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
-import sys
+
+logger = logging.getLogger(__name__)
+
+
+def _version_sort_key(version_str: str):
+    """
+    Parse a version string like '1.10.2' into a tuple of ints for proper sorting.
+
+    Falls back to string comparison if parsing fails.
+    """
+    try:
+        return tuple(int(x) for x in version_str.split("."))
+    except (ValueError, AttributeError):
+        return (0, 0, 0)
+
 
 class ModelRegistry:
-    """Manages model versions and deployment status"""
-    
-    def __init__(self, registry_dir: str = './models'):
+    """Manages model versions and deployment status."""
+
+    def __init__(self, registry_dir: str = "./models"):
         self.registry_dir = Path(registry_dir)
         self.registry_dir.mkdir(exist_ok=True, parents=True)
-        self.index_file = self.registry_dir / 'registry.json'
+        self.index_file = self.registry_dir / "registry.json"
         self._load_index()
-    
+
     def _load_index(self):
-        """Load registry index"""
+        """Load registry index."""
         if self.index_file.exists():
             with open(self.index_file) as f:
                 self.index = json.load(f)
         else:
             self.index = {
-                'versions': {},
-                'production': None,
-                'staging': None
+                "versions": {},
+                "production": None,
+                "staging": None,
             }
-    
+
     def _save_index(self):
-        """Save registry index"""
-        with open(self.index_file, 'w') as f:
+        """Save registry index."""
+        with open(self.index_file, "w") as f:
             json.dump(self.index, f, indent=2)
-    
+
     def register(
         self,
         model_path: Path,
         version: str,
         metrics: Optional[Dict] = None,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        force: bool = False,
     ) -> bool:
         """
-        Register a new model version
-        
+        Register a new model version.
+
         Args:
-            model_path: Path to model .pt file
-            version: Semantic version (e.g., '1.0.0')
-            metrics: Performance metrics dictionary
-            metadata: Additional metadata
-            
+            model_path: Path to model .pt file.
+            version:    Semantic version (e.g., '1.0.0').
+            metrics:    Performance metrics dictionary.
+            metadata:   Additional metadata.
+            force:      Overwrite existing version without prompting.
+
         Returns:
-            True if registration succeeded
+            True if registration succeeded.
         """
         if not model_path.exists():
-            print(f"❌ Model not found: {model_path}")
+            logger.error(f"❌ Model not found: {model_path}")
             return False
-        
-        if version in self.index['versions']:
-            print(f"⚠️  Version {version} already exists")
-            overwrite = input("Overwrite? (y/n): ").lower()
-            if overwrite != 'y':
+
+        if version in self.index["versions"]:
+            if not force:
+                logger.warning(
+                    f"⚠️  Version {version} already exists. "
+                    "Use force=True (or --force) to overwrite."
+                )
                 return False
-        
+            logger.info(f"🔄 Overwriting existing version {version}")
+
         # Create version directory
         version_dir = self.registry_dir / f"v{version}"
         version_dir.mkdir(exist_ok=True, parents=True)
-        
+
         # Copy model
-        model_dest = version_dir / 'best.pt'
+        model_dest = version_dir / "best.pt"
         shutil.copy2(model_path, model_dest)
-        
+
         # Load metrics if not provided
         if metrics is None:
-            metrics_file = model_path.parent.parent / 'metrics.json'
+            metrics_file = model_path.parent.parent / "metrics.json"
             if metrics_file.exists():
                 with open(metrics_file) as f:
                     metrics = json.load(f)
             else:
                 metrics = {}
-        
+
         # Get model size
         size_mb = model_dest.stat().st_size / (1024 * 1024)
-        
+
         # Create version entry
         version_info = {
-            'version': version,
-            'path': str(model_dest),
-            'registered_at': datetime.now().isoformat(),
-            'status': 'testing',
-            'metrics': metrics,
-            'size_mb': round(size_mb, 2),
-            'metadata': metadata or {}
+            "version": version,
+            "path": str(model_dest),
+            "registered_at": datetime.now().isoformat(),
+            "status": "testing",
+            "metrics": metrics,
+            "size_mb": round(size_mb, 2),
+            "metadata": metadata or {},
         }
-        
-        self.index['versions'][version] = version_info
+
+        self.index["versions"][version] = version_info
         self._save_index()
-        
-        print(f"✅ Registered model v{version}")
-        print(f"   Path: {model_dest}")
-        print(f"   Size: {size_mb:.2f} MB")
+
+        logger.info(f"✅ Registered model v{version}")
+        logger.info(f"   Path: {model_dest}")
+        logger.info(f"   Size: {size_mb:.2f} MB")
         if metrics:
-            print(f"   mAP@50: {metrics.get('map50', 'N/A')}")
-        
+            logger.info(f"   mAP@50: {metrics.get('map50', 'N/A')}")
+
         return True
-    
+
     def list_versions(self, status: Optional[str] = None) -> List[Dict]:
         """
-        List all registered versions
-        
+        List all registered versions.
+
         Args:
-            status: Filter by status (testing/staging/production)
-            
+            status: Filter by status (testing/staging/production).
+
         Returns:
-            List of version dictionaries
+            List of version dictionaries, sorted by semantic version (descending).
         """
-        versions = list(self.index['versions'].values())
-        
+        versions = list(self.index["versions"].values())
+
         if status:
-            versions = [v for v in versions if v['status'] == status]
-        
-        # Sort by version (descending)
-        versions.sort(key=lambda x: x['version'], reverse=True)
-        
+            versions = [v for v in versions if v["status"] == status]
+
+        # Semantic version sort (handles 1.10.0 > 1.9.0 correctly)
+        versions.sort(
+            key=lambda x: _version_sort_key(x["version"]),
+            reverse=True,
+        )
+
         return versions
-    
+
     def compare(self, version1: str, version2: str):
-        """Compare two model versions"""
-        v1 = self.index['versions'].get(version1)
-        v2 = self.index['versions'].get(version2)
-        
+        """Compare two model versions."""
+        v1 = self.index["versions"].get(version1)
+        v2 = self.index["versions"].get(version2)
+
         if not v1:
-            print(f"❌ Version {version1} not found")
+            logger.error(f"❌ Version {version1} not found")
             return
         if not v2:
-            print(f"❌ Version {version2} not found")
+            logger.error(f"❌ Version {version2} not found")
             return
-        
-        print(f"\n{'='*70}")
+
+        print(f"\n{'=' * 70}")
         print(f"COMPARISON: v{version1} vs v{version2}")
-        print(f"{'='*70}\n")
-        
+        print(f"{'=' * 70}\n")
+
         # Metrics comparison
-        metrics_keys = set(v1['metrics'].keys()) | set(v2['metrics'].keys())
-        
+        metrics_keys = set(v1["metrics"].keys()) | set(v2["metrics"].keys())
+
         print("📊 Metrics:")
         print(f"{'Metric':<20} | v{version1:<10} | v{version2:<10} | Diff")
         print("-" * 70)
-        
+
         for key in sorted(metrics_keys):
-            val1 = v1['metrics'].get(key, 0)
-            val2 = v2['metrics'].get(key, 0)
-            
+            val1 = v1["metrics"].get(key, 0)
+            val2 = v2["metrics"].get(key, 0)
+
             if isinstance(val1, (int, float)) and isinstance(val2, (int, float)):
                 diff = val2 - val1
                 diff_pct = (diff / val1 * 100) if val1 != 0 else 0
                 diff_str = f"{diff:+.4f} ({diff_pct:+.1f}%)"
-                
+
                 if diff > 0:
                     symbol = "🟢"
                 elif diff < 0:
                     symbol = "🔴"
                 else:
                     symbol = "⚪"
-                
-                print(f"{key:<20} | {val1:<10.4f} | {val2:<10.4f} | {symbol} {diff_str}")
+
+                print(
+                    f"{key:<20} | {val1:<10.4f} | {val2:<10.4f} | "
+                    f"{symbol} {diff_str}"
+                )
             else:
                 print(f"{key:<20} | {val1:<10} | {val2:<10} | -")
-        
+
         # Size comparison
         print(f"\n📦 Model Size:")
         print(f"   v{version1}: {v1['size_mb']:.2f} MB")
         print(f"   v{version2}: {v2['size_mb']:.2f} MB")
         print(f"   Difference: {v2['size_mb'] - v1['size_mb']:+.2f} MB")
-        
+
         # Status
         print(f"\n🔖 Status:")
         print(f"   v{version1}: {v1['status']}")
         print(f"   v{version2}: {v2['status']}")
-    
-    def promote(self, version: str, to: str = 'production'):
-        """Promote a version to a deployment stage"""
-        if version not in self.index['versions']:
-            print(f"❌ Version {version} not found")
+
+    def promote(self, version: str, to: str = "production") -> bool:
+        """Promote a version to a deployment stage."""
+        if version not in self.index["versions"]:
+            logger.error(f"❌ Version {version} not found")
             return False
-        
-        valid_stages = ['testing', 'staging', 'production']
+
+        valid_stages = ["testing", "staging", "production"]
         if to not in valid_stages:
-            print(f"❌ Invalid stage: {to}. Choose from: {valid_stages}")
+            logger.error(f"❌ Invalid stage: {to}. Choose from: {valid_stages}")
             return False
-        
+
         # Update version status
-        self.index['versions'][version]['status'] = to
-        
+        self.index["versions"][version]["status"] = to
+
         # Update stage pointer
-        if to in ['staging', 'production']:
+        if to in ["staging", "production"]:
             self.index[to] = version
-        
+
         self._save_index()
-        
-        print(f"✅ Promoted v{version} to {to}")
-        
-        if to == 'production':
-            print(f"\n⚠️  PRODUCTION DEPLOYMENT")
-            print(f"   Update mobile app to use: models/v{version}/best.mlpackage")
-        
+
+        logger.info(f"✅ Promoted v{version} to {to}")
+
+        if to == "production":
+            logger.info(f"\n⚠️  PRODUCTION DEPLOYMENT")
+            logger.info(
+                f"   Update mobile app to use: models/v{version}/best.mlpackage"
+            )
+
         return True
-    
-    def rollback(self, version: str):
-        """Rollback production to a previous version"""
-        if version not in self.index['versions']:
-            print(f"❌ Version {version} not found")
+
+    def rollback(self, version: str) -> bool:
+        """Rollback production to a previous version."""
+        if version not in self.index["versions"]:
+            logger.error(f"❌ Version {version} not found")
             return False
-        
-        current_prod = self.index.get('production')
-        
+
+        current_prod = self.index.get("production")
+
         if current_prod == version:
-            print(f"⚠️  v{version} is already in production")
+            logger.warning(f"⚠️  v{version} is already in production")
             return False
-        
-        print(f"🔄 Rolling back from v{current_prod} to v{version}")
-        
-        # Interactive prompt generally avoided in automated CLI unless --yes is passed
-        # For now, we will assume user intent if they call the command.
-        
-        return self.promote(version, 'production')
-    
+
+        logger.info(f"🔄 Rolling back from v{current_prod} to v{version}")
+        return self.promote(version, "production")
+
     def print_table(self, versions: List[Dict]):
-        """Print versions as formatted table"""
+        """Print versions as formatted table."""
         if not versions:
             print("No versions found")
             return
-        
-        print(f"\n{'='*90}")
-        print("MODEL REGISTRY")
-        print(f"{'='*90}\n")
-        
-        print(f"{'Version':<12} | {'mAP@50':<8} | {'Size':<8} | {'Status':<12} | {'Date':<12}")
-        print("-" * 90)
-        
-        for v in versions:
-            version = v['version']
-            map50 = v['metrics'].get('map50', 0)
-            size = f"{v['size_mb']:.1f}MB"
-            status = v['status']
-            date = v['registered_at'][:10]  # Just the date part
-            
-            # Add emoji for production
-            if status == 'production':
-                status = f"🌟 {status}"
-            elif status == 'staging':
-                status = f"🚀 {status}"
-            
-            print(f"v{version:<11} | {map50:<8.4f} | {size:<8} | {status:<12} | {date:<12}")
-        
-        print()
 
+        print(f"\n{'=' * 90}")
+        print("MODEL REGISTRY")
+        print(f"{'=' * 90}\n")
+
+        print(
+            f"{'Version':<12} | {'mAP@50':<8} | {'Size':<8} | "
+            f"{'Status':<12} | {'Date':<12}"
+        )
+        print("-" * 90)
+
+        for v in versions:
+            version = v["version"]
+            map50 = v["metrics"].get("map50", 0)
+            size = f"{v['size_mb']:.1f}MB"
+            status = v["status"]
+            date = v["registered_at"][:10]
+
+            # Add emoji for deployment stages
+            if status == "production":
+                status_display = f"🌟 {status}"
+            elif status == "staging":
+                status_display = f"🚀 {status}"
+            else:
+                status_display = status
+
+            print(
+                f"v{version:<11} | {map50:<8.4f} | {size:<8} | "
+                f"{status_display:<12} | {date:<12}"
+            )
+
+        print()
 
 ======= FILE: src/leafmd/core/__init__.py =======
 
 
 
-======= FILE: src/leafmd/core/dataset.py =======
+======= FILE: src/leafmd/core/config.py =======
 
+"""
+config.py — Single source of truth for all pipeline configuration.
+
+Replaces the scattered config-loading logic in train.py, export.py, cli.py,
+and plantvillage_pipeline.py with a typed, validated dataclass.
+"""
+
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+import yaml
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TrainConfig:
+    """Training hyperparameters mapped to YOLO.train() kwargs."""
+    model: str = "yolo26n"
+    epochs: int = 50
+    batch: int = 16
+    imgsz: int = 640
+    workers: int = 0  # MPS-safe default; overridden by EnvironmentValidator
+    optimizer: str = "auto"
+    lr0: Optional[float] = None
+    momentum: float = 0.937
+    weight_decay: float = 0.0005
+    patience: int = 10
+    amp: bool = True
+    project: str = "runs/train"
+    name: str = "exp"
+    exist_ok: bool = False
+    resume: bool = False
+    device: str = "mps"
+
+    # Augmentation — only YOLO-valid keys
+    mosaic: float = 1.0
+    mixup: float = 0.5
+    hsv_h: float = 0.015
+    hsv_s: float = 0.7
+    hsv_v: float = 0.4
+    degrees: float = 10.0
+    translate: float = 0.1
+    scale: float = 0.5
+    shear: float = 2.0
+    perspective: float = 0.0
+    flipud: float = 0.0
+    fliplr: float = 0.5
+    copy_paste: float = 0.0
+
+    @classmethod
+    def from_yaml(cls, yaml_path: Path) -> "TrainConfig":
+        """Load training config from config.yaml, remapping keys to YOLO arg names."""
+        with open(yaml_path) as f:
+            raw = yaml.safe_load(f)
+
+        train = raw.get("training", {})
+        aug = raw.get("augmentation", {})
+        merged = {**train, **aug}
+
+        # Remap config.yaml keys to YOLO / dataclass field names
+        key_remap = {
+            "batch_size": "batch",
+            "image_size": "imgsz",
+            "learning_rate": "lr0",
+        }
+        for old_key, new_key in key_remap.items():
+            if old_key in merged:
+                merged[new_key] = merged.pop(old_key)
+
+        # Only keep fields that exist on the dataclass
+        valid_fields = cls.__dataclass_fields__
+        filtered = {k: v for k, v in merged.items() if k in valid_fields}
+
+        return cls(**filtered)
+
+    def to_yolo_kwargs(self) -> Dict[str, Any]:
+        """
+        Return a clean dict for YOLO.train(**kwargs).
+
+        Excludes 'model' and 'device' (passed separately) and strips None values.
+        """
+        d = asdict(self)
+        # These are NOT YOLO.train() kwargs — they are handled separately
+        d.pop("model", None)
+        d.pop("device", None)
+        return {k: v for k, v in d.items() if v is not None}
+
+
+@dataclass
+class ExportConfig:
+    """Export settings."""
+    formats: List[str] = field(default_factory=lambda: ["coreml"])
+    int8: bool = True
+    calibrate: bool = True  # kept for future use
+    calibration_samples: int = 200
+    nms: bool = False
+    minimum_ios: int = 17
+    compute_units: str = "ALL"
+
+    @classmethod
+    def from_yaml(cls, yaml_path: Path) -> "ExportConfig":
+        with open(yaml_path) as f:
+            raw = yaml.safe_load(f)
+        export = raw.get("export", {})
+        coreml = export.pop("coreml", {})
+        merged = {**export, **coreml}
+        valid_fields = cls.__dataclass_fields__
+        filtered = {k: v for k, v in merged.items() if k in valid_fields}
+        return cls(**filtered)
+
+
+@dataclass
+class DatasetConfig:
+    """Dataset acquisition and mixing settings."""
+    cache_dir: str = "data"
+    mix_field_data: bool = False
+    mix_ratio: float = 0.3
+
+    @classmethod
+    def from_yaml(cls, yaml_path: Path) -> "DatasetConfig":
+        with open(yaml_path) as f:
+            raw = yaml.safe_load(f)
+        ds = raw.get("dataset", {})
+        # Flatten nested field_data config
+        field_data = ds.pop("field_data", {})
+        if "mix_ratio" in field_data:
+            ds["mix_ratio"] = field_data["mix_ratio"]
+        valid_fields = cls.__dataclass_fields__
+        filtered = {k: v for k, v in ds.items() if k in valid_fields}
+        return cls(**filtered)
+
+
+@dataclass
+class MonitoringConfig:
+    """WandB and TensorBoard settings."""
+    wandb_enabled: bool = False
+    wandb_project: str = "plantvillage-detection"
+    wandb_entity: Optional[str] = None
+    tensorboard_enabled: bool = False
+    tensorboard_log_dir: str = "runs/tensorboard"
+
+    @classmethod
+    def from_yaml(cls, yaml_path: Path) -> "MonitoringConfig":
+        with open(yaml_path) as f:
+            raw = yaml.safe_load(f)
+        mon = raw.get("monitoring", {})
+        wandb = mon.get("wandb", {})
+        tb = mon.get("tensorboard", {})
+        return cls(
+            wandb_enabled=wandb.get("enabled", False),
+            wandb_project=wandb.get("project", "plantvillage-detection"),
+            wandb_entity=wandb.get("entity"),
+            tensorboard_enabled=tb.get("enabled", False),
+            tensorboard_log_dir=tb.get("log_dir", "runs/tensorboard"),
+        )
+
+    def apply_env_vars(self):
+        """Set environment variables that Ultralytics reads for logging integrations."""
+        import os
+        if self.wandb_enabled:
+            os.environ.pop("WANDB_DISABLED", None)
+            os.environ["WANDB_PROJECT"] = self.wandb_project
+            if self.wandb_entity:
+                os.environ["WANDB_ENTITY"] = self.wandb_entity
+            logger.info(f"WandB enabled: project={self.wandb_project}")
+        else:
+            os.environ["WANDB_DISABLED"] = "true"
+
+
+@dataclass
+class ValidationConfig:
+    """Validation-phase settings."""
+    split: str = "test"
+    device: str = "cpu"  # Always CPU to avoid MPS NMS bugs
+    conf_threshold: float = 0.001
+    iou_threshold: float = 0.6
+    max_det: int = 300
+
+    @classmethod
+    def from_yaml(cls, yaml_path: Path) -> "ValidationConfig":
+        with open(yaml_path) as f:
+            raw = yaml.safe_load(f)
+        val = raw.get("validation", {})
+        valid_fields = cls.__dataclass_fields__
+        filtered = {k: v for k, v in val.items() if k in valid_fields}
+        return cls(**filtered)
+
+
+@dataclass
+class PipelineConfig:
+    """Top-level container aggregating all sub-configs."""
+    train: TrainConfig = field(default_factory=TrainConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
+
+    @classmethod
+    def from_yaml(cls, yaml_path: Path) -> "PipelineConfig":
+        """Load full pipeline config from a single YAML file."""
+        if not yaml_path.exists():
+            logger.warning(f"Config not found at {yaml_path}, using defaults.")
+            return cls()
+        return cls(
+            train=TrainConfig.from_yaml(yaml_path),
+            export=ExportConfig.from_yaml(yaml_path),
+            dataset=DatasetConfig.from_yaml(yaml_path),
+            monitoring=MonitoringConfig.from_yaml(yaml_path),
+            validation=ValidationConfig.from_yaml(yaml_path),
+        )
+
+    @property
+    def best_weights_path(self) -> Path:
+        """Resolve the expected path to best.pt from training config."""
+        return Path(self.train.project) / self.train.name / "weights" / "best.pt"
+
+    @property
+    def experiment_dir(self) -> Path:
+        return Path(self.train.project) / self.train.name
+
+    @property
+    def data_yaml_path(self) -> Path:
+        return Path(self.dataset.cache_dir) / "data.yaml"
+
+
+======= FILE: src/leafmd/core/dataset.py =======
 
 import os
 import shutil
@@ -3754,114 +5042,144 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+
 class DatasetLoader:
-    """Handles secure dataset loading with multiple fallbacks"""
-    
-    def __init__(self, cache_dir: str = '../data'):
+    """Handles secure dataset loading with multiple fallbacks."""
+
+    def __init__(self, cache_dir: str = "../data"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True, parents=True)
-    
+
     def load(self) -> Optional[Path]:
         """
-        Load dataset with fallback options
-        
+        Load dataset with fallback options.
+
+        Priority: local cache → Roboflow → Kaggle → manual instructions.
+
         Returns:
-            Path to data.yaml or None if all options fail
+            Path to data.yaml or None if all options fail.
         """
-        logger.info("="*70)
+        logger.info("=" * 70)
         logger.info("DATASET LOADING")
-        logger.info("="*70 + "\n")
-        
+        logger.info("=" * 70 + "\n")
+
         # Try cache first
         logger.info("🔍 Checking for cached dataset...")
         yaml_path = self._use_cached()
         if yaml_path:
             return yaml_path
-        
+
         # Try Roboflow
         logger.info("\n📥 Attempting Roboflow download...")
         yaml_path = self._download_roboflow()
         if yaml_path:
             return yaml_path
-        
+
         # Try Kaggle
         logger.info("\n📥 Attempting Kaggle download...")
         yaml_path = self._download_kaggle()
         if yaml_path:
             return yaml_path
-        
+
         # All failed
-        logger.error("\n" + "="*70)
+        logger.error("\n" + "=" * 70)
         logger.error("❌ DATASET DOWNLOAD FAILED")
-        logger.error("="*70)
+        logger.error("=" * 70)
         logger.error("\nManual download options:")
-        logger.error("1. Roboflow: https://universe.roboflow.com/zkamlasi-kamlasi-hj4wj/plantvillage-dataset")
-        logger.error("2. Kaggle: https://www.kaggle.com/datasets/sebastianpalaciob/plantvillage-for-object-detection-yolo")
+        logger.error(
+            "1. Roboflow: https://universe.roboflow.com/"
+            "zkamlasi-kamlasi-hj4wj/plantvillage-dataset"
+        )
+        logger.error(
+            "2. Kaggle: https://www.kaggle.com/datasets/"
+            "sebastianpalaciob/plantvillage-for-object-detection-yolo"
+        )
         logger.error(f"\nExtract to: {self.cache_dir.absolute()}")
         logger.error("Then run this script again.\n")
-        
+
         return None
-    
+
     def _use_cached(self) -> Optional[Path]:
-        """Check for existing cached dataset"""
-        yaml_files = list(self.cache_dir.rglob('data.yaml'))
-        
-        if yaml_files:
-            yaml_path = yaml_files[0]
-            logger.info(f"✅ Found cached dataset: {yaml_path.parent}")
-            self._print_dataset_info(yaml_path)
-            return yaml_path
-        
+        """
+        Check for existing cached dataset.
+
+        Search strategy (most-specific first):
+          1. Top-level data.yaml in cache_dir
+          2. data.yaml one directory deep (e.g. cache_dir/PlantVillage-1/data.yaml)
+          3. (No deeper — avoids grabbing stale nested copies)
+        """
+        # Prefer top-level data.yaml — most likely the correct one
+        direct = self.cache_dir / "data.yaml"
+        if direct.exists():
+            logger.info(f"✅ Found cached dataset: {direct.parent}")
+            self._print_dataset_info(direct)
+            return direct
+
+        # Search one level deep only
+        if self.cache_dir.is_dir():
+            for child in sorted(self.cache_dir.iterdir()):
+                if child.is_dir():
+                    candidate = child / "data.yaml"
+                    if candidate.exists():
+                        logger.info(f"✅ Found cached dataset: {candidate.parent}")
+                        self._print_dataset_info(candidate)
+                        return candidate
+
         logger.info("   No cached dataset found")
         return None
-    
+
     def _download_roboflow(self) -> Optional[Path]:
-        """Download from Roboflow"""
-        api_key = os.getenv('ROBOFLOW_API_KEY')
-        
+        """Download from Roboflow."""
+        api_key = os.getenv("ROBOFLOW_API_KEY")
+
         if not api_key:
             logger.warning("⚠️  No ROBOFLOW_API_KEY in environment")
             logger.info("   Set it: export ROBOFLOW_API_KEY='your_key'")
             logger.info("   Get key: https://app.roboflow.com")
             return None
-        
+
         try:
             from roboflow import Roboflow
-            
+
             logger.info("   Connecting to Roboflow...")
             rf = Roboflow(api_key=api_key)
-            project = rf.workspace("zkamlasi-kamlasi-hj4wj").project("plantvillage-dataset")
+            project = rf.workspace("zkamlasi-kamlasi-hj4wj").project(
+                "plantvillage-dataset"
+            )
             version = project.version(1)
-            
+
             logger.info("   Downloading dataset (this may take 5-10 minutes)...")
             dataset = version.download("yolov11", location=str(self.cache_dir))
-            
+
             yaml_path = Path(dataset.location) / "data.yaml"
             logger.info(f"✅ Downloaded to: {yaml_path.parent}")
             self._print_dataset_info(yaml_path)
             return yaml_path
-            
+
         except Exception as e:
             logger.error(f"❌ Roboflow download failed: {e}")
             return None
-    
+
     def _download_kaggle(self) -> Optional[Path]:
-        """Download from Kaggle"""
+        """Download from Kaggle."""
         try:
             import kaggle
-            
-            dataset_slug = "sebastianpalaciob/plantvillage-for-object-detection-yolo"
+
+            dataset_slug = (
+                "sebastianpalaciob/plantvillage-for-object-detection-yolo"
+            )
             download_path = self.cache_dir / "plantvillage_kaggle"
-            
+
             logger.info("   Downloading from Kaggle...")
             kaggle.api.dataset_download_files(
                 dataset_slug,
                 path=download_path,
                 unzip=True,
-                quiet=False
+                quiet=False,
             )
-            
-            yaml_files = list(download_path.rglob('data.yaml'))
+
+            # Search one level deep for data.yaml in the download
+            yaml_files = list(download_path.rglob("data.yaml"))
             if yaml_files:
                 logger.info(f"✅ Downloaded from Kaggle: {yaml_files[0].parent}")
                 self._print_dataset_info(yaml_files[0])
@@ -3869,37 +5187,37 @@ class DatasetLoader:
             else:
                 logger.error("❌ No data.yaml found in Kaggle dataset")
                 return None
-                
+
         except Exception as e:
             logger.error(f"❌ Kaggle download failed: {e}")
             logger.info("   Setup Kaggle: https://www.kaggle.com/settings")
             return None
-    
+
     def _print_dataset_info(self, yaml_path: Path):
-        """Print dataset statistics"""
+        """Print dataset statistics."""
         try:
             with open(yaml_path) as f:
                 config = yaml.safe_load(f)
-            
-            logger.info(f"\n📊 Dataset Info:")
-            logger.info(f"   Classes: {config['nc']}")
-            
-            class_names = config['names'][:5]
-            if len(config['names']) > 5:
-                class_names_str = ', '.join(class_names) + '...'
+
+            logger.info("\n📊 Dataset Info:")
+            logger.info(f"   Classes: {config.get('nc', '?')}")
+
+            names = config.get("names", [])
+            preview = names[:5]
+            if len(names) > 5:
+                names_str = ", ".join(str(n) for n in preview) + "..."
             else:
-                class_names_str = ', '.join(class_names)
-            
-            logger.info(f"   Examples: {class_names_str}")
+                names_str = ", ".join(str(n) for n in preview)
+
+            logger.info(f"   Examples: {names_str}")
             logger.info(f"   Location: {yaml_path.parent}")
-            
+
         except Exception as e:
             logger.warning(f"⚠️  Could not read dataset info: {e}")
 
-
 ======= FILE: src/leafmd/core/environment.py =======
 
-
+import os
 import sys
 import logging
 import platform
@@ -3910,291 +5228,437 @@ from typing import Tuple, Dict
 
 logger = logging.getLogger(__name__)
 
+
 class EnvironmentValidator:
     """Validates system requirements before training"""
-    
+
+    # ──────────────────────────────────────────────
+    # MPS Safety Helpers (single point of change)
+    # ──────────────────────────────────────────────
+
+    @staticmethod
+    def get_safe_worker_count(device: str) -> int:
+        """
+        Return safe DataLoader worker count for the given device.
+
+        MPS shared-memory bug: workers > 0 causes OOM crashes on macOS.
+        Revisit when PyTorch ships the MPS DataLoader fix
+        (tracked at https://github.com/pytorch/pytorch/issues/XXXXX).
+        """
+        if device == "mps":
+            return 0
+        return min(os.cpu_count() or 1, 4)
+
+    @staticmethod
+    def get_validation_device(training_device: str) -> str:
+        """
+        Return safe validation device.
+
+        MPS NMS coordinate corruption bug produces 0.0 mAP.
+        Force CPU until the upstream fix lands in a stable PyTorch release.
+        """
+        if training_device == "mps":
+            return "cpu"
+        return training_device
+
+    @staticmethod
+    def is_mps_safe() -> bool:
+        """
+        Quick probe: can MPS handle a trivial matmul without crashing?
+
+        Returns False (and logs a warning) if anything goes wrong.
+        """
+        if not torch.backends.mps.is_available():
+            return False
+        try:
+            t = torch.randn(100, 100, device="mps")
+            _ = t @ t.T
+            return True
+        except Exception as e:
+            logger.warning(f"MPS operational test failed: {e}")
+            return False
+
+    # ──────────────────────────────────────────────
+    # Full Validation
+    # ──────────────────────────────────────────────
+
     @staticmethod
     def validate() -> Tuple[bool, str, Dict[str, str]]:
         """
-        Validate system requirements
-        
+        Validate system requirements.
+
         Returns:
-            Tuple of (is_valid, device, system_info)
+            Tuple of (is_valid, recommended_device, system_info)
         """
-        logger.info("="*70)
+        logger.info("=" * 70)
         logger.info("ENVIRONMENT VALIDATION")
-        logger.info("="*70)
-        
-        system_info = {}
+        logger.info("=" * 70)
+
+        system_info: Dict[str, str] = {}
         issues = []
-        
-        # Check Python version
-        python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-        system_info['python'] = python_version
+
+        # ── Python version ────────────────────────
+        python_version = (
+            f"{sys.version_info.major}."
+            f"{sys.version_info.minor}."
+            f"{sys.version_info.micro}"
+        )
+        system_info["python"] = python_version
         logger.info(f"Python: {python_version}")
-        
+
         if sys.version_info < (3, 11):
             issues.append(f"Python 3.11+ required, found {python_version}")
-        
-        # Check architecture
+
+        # ── Architecture ──────────────────────────
         arch = platform.machine()
-        system_info['architecture'] = arch
+        system_info["architecture"] = arch
         logger.info(f"Architecture: {arch}")
-        
-        if arch != 'arm64':
+
+        if arch != "arm64":
             issues.append(f"ARM64 (Apple Silicon) required, found {arch}")
-        
-        # Check PyTorch
-        system_info['pytorch'] = torch.__version__
+
+        # ── PyTorch ───────────────────────────────
+        system_info["pytorch"] = torch.__version__
         logger.info(f"PyTorch: {torch.__version__}")
-        
-        # Check MPS
+
+        # ── MPS ───────────────────────────────────
         mps_built = torch.backends.mps.is_built()
         mps_available = torch.backends.mps.is_available()
-        
-        system_info['mps_built'] = str(mps_built)
-        system_info['mps_available'] = str(mps_available)
-        
+
+        system_info["mps_built"] = str(mps_built)
+        system_info["mps_available"] = str(mps_available)
+
         if not mps_built:
             issues.append("PyTorch not built with MPS support. Reinstall PyTorch.")
-        
-        device = 'mps' if mps_available else 'cpu'
-        
+
+        device = "mps" if mps_available else "cpu"
+
         if not mps_available:
             logger.warning("⚠️  MPS not available. Training will use CPU (slow!)")
             if mps_built:
                 issues.append("MPS built but not available. Update to macOS 12.3+")
         else:
             logger.info("✅ MPS available")
-            # Test MPS with simple operation
-            try:
-                test_tensor = torch.randn(100, 100, device='mps')
-                _ = test_tensor @ test_tensor.T
+            if EnvironmentValidator.is_mps_safe():
                 logger.info("✅ MPS operational test: PASSED")
-            except Exception as e:
-                logger.error(f"❌ MPS operational test: FAILED ({e})")
-                device = 'cpu'
-                issues.append(f"MPS failed operational test: {e}")
-        
-        # Check disk space
+            else:
+                logger.error("❌ MPS operational test: FAILED")
+                device = "cpu"
+                issues.append("MPS failed operational test — falling back to CPU")
+
+        # ── Disk space ────────────────────────────
         disk = shutil.disk_usage(Path.home())
-        free_gb = disk.free / (1024**3)
-        system_info['free_disk_gb'] = f"{free_gb:.1f}"
+        free_gb = disk.free / (1024 ** 3)
+        system_info["free_disk_gb"] = f"{free_gb:.1f}"
         logger.info(f"💾 Free disk space: {free_gb:.1f} GB")
-        
+
         if free_gb < 25:
             issues.append(f"Low disk space: {free_gb:.1f}GB. Need 25GB minimum")
-        
-        # Check RAM (approximate for M-series)
-        if 'M4 Max' in str(platform.processor()):
+
+        # ── Chip detection ────────────────────────
+        processor = str(platform.processor())
+        if "M4 Max" in processor:
             logger.info("🚀 Detected M4 Max (optimal performance)")
-        
+        system_info["processor"] = processor
+
+        # ── Safe workers ──────────────────────────
+        safe_workers = EnvironmentValidator.get_safe_worker_count(device)
+        system_info["safe_workers"] = str(safe_workers)
+        logger.info(f"👷 Safe DataLoader workers: {safe_workers}")
+
+        # ── Summary ───────────────────────────────
         logger.info(f"\n🎯 Training device: {device.upper()}")
-        
+
         is_valid = len(issues) == 0
-        
+
         if not is_valid:
             logger.error("\n❌ Validation failed:")
             for issue in issues:
                 logger.error(f"   • {issue}")
         else:
             logger.info("✅ Environment validation passed")
-        
+
         logger.info("")
-        
+
         return is_valid, device, system_info
 
-
 ======= FILE: src/leafmd/core/exporter.py =======
-
 
 import yaml
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, NamedTuple
 import coremltools as ct
 from ultralytics import YOLO
 
 logger = logging.getLogger(__name__)
 
+
+class CoreMLExportResult(NamedTuple):
+    """Result of a CoreML export attempt, including which precision was achieved."""
+    path: Optional[Path]
+    precision: str  # "int8", "fp16", "fp32", or "failed"
+
+
 class ModelExporter:
-    """Handles model export to CoreML and ONNX"""
-    
+    """Handles model export to CoreML, ONNX, and TFLite."""
+
     def __init__(self, model_path: Path, data_yaml: Path):
         self.model_path = model_path
         self.data_yaml = data_yaml
-    
+
     def export(
         self,
-        formats: list = ['coreml'],
+        formats: list = None,
         int8: bool = True,
-        calibrate: bool = True,
-        n_calibration: int = 200
     ) -> Dict[str, Optional[Path]]:
         """
-        Export model to specified formats
-        
+        Export model to specified formats.
+
         Args:
-            formats: List of formats ['coreml', 'onnx', 'tflite']
-            int8: Use INT8 quantization (CoreML only)
-            calibrate: Unused in new pipeline (handled by ultralytics)
-            n_calibration: Unused
-            
+            formats: List of formats ['coreml', 'onnx', 'tflite'].
+                     Defaults to ['coreml'].
+            int8:    Use INT8 quantization (CoreML only).
+
         Returns:
-            Dictionary mapping format to export path
+            Dictionary mapping format name to export path (or None on failure).
         """
-        logger.info("="*70)
+        if formats is None:
+            formats = ["coreml"]
+
+        logger.info("=" * 70)
         logger.info("MODEL EXPORT")
-        logger.info("="*70 + "\n")
-        
+        logger.info("=" * 70 + "\n")
+
         logger.info(f"📦 Source model: {self.model_path}")
         logger.info(f"📋 Formats: {', '.join(formats)}")
         logger.info(f"🔢 Quantization: {'INT8' if int8 else 'FP32'}")
-        
+
         model = YOLO(str(self.model_path))
-        exports = {}
-        
+        exports: Dict[str, Optional[Path]] = {}
+
         for fmt in formats:
             logger.info(f"\n🔄 Exporting to {fmt.upper()}...")
-            
+
             try:
-                if fmt == 'coreml':
-                    exports[fmt] = self._export_coreml_robust(model, int8)
-                
-                elif fmt == 'onnx':
+                if fmt == "coreml":
+                    result = self._export_coreml_robust(model, int8)
+                    exports[fmt] = result.path
+                    if result.path:
+                        logger.info(
+                            f"✅ CoreML export succeeded at {result.precision.upper()} precision"
+                        )
+                    else:
+                        logger.error("❌ CoreML export failed at all precision levels")
+
+                elif fmt == "onnx":
                     export_path = model.export(
-                        format='onnx',
+                        format="onnx",
                         opset=17,
-                        dynamic=False
+                        dynamic=False,
                     )
                     exports[fmt] = Path(export_path)
                     logger.info(f"✅ Exported: {export_path}")
-                
-                elif fmt == 'tflite':
+
+                elif fmt == "tflite":
                     export_path = model.export(
-                        format='tflite',
-                        int8=int8
+                        format="tflite",
+                        int8=int8,
                     )
                     exports[fmt] = Path(export_path)
                     logger.info(f"✅ Exported: {export_path}")
-                
+
                 else:
                     logger.warning(f"⚠️  Unknown format: {fmt}")
                     continue
-                
+
             except Exception as e:
                 logger.error(f"❌ Export to {fmt} failed: {e}")
                 exports[fmt] = None
-        
+
         return exports
 
-    def _export_coreml_robust(self, model, int8: bool) -> Optional[Path]:
+    def export_coreml(self, int8: bool = True) -> CoreMLExportResult:
         """
-        Export to CoreML with graceful degradation: INT8 -> FP16 -> FP32
+        Convenience method for CoreML-only export.
+
+        Returns a CoreMLExportResult with path and actual precision achieved.
         """
-        # Attempt 1: INT8 (if requested)
+        model = YOLO(str(self.model_path))
+        return self._export_coreml_robust(model, int8)
+
+    # ──────────────────────────────────────────────────────
+    # Internal: CoreML export with graceful degradation
+    # ──────────────────────────────────────────────────────
+
+    def _export_coreml_robust(self, model, int8: bool) -> CoreMLExportResult:
+        """
+        Export to CoreML with fallback chain: INT8 → FP16 → FP32.
+
+        Returns:
+            CoreMLExportResult with the path and the actual precision used.
+        """
+        # ── Attempt 1: INT8 ──────────────────────
         if int8:
             try:
                 logger.info("   Attempt 1: Exporting INT8 (Linear Quantization)...")
-                # Ultralytics handles the complexity of coremltools interactions
                 export_path = model.export(
-                    format='coreml',
+                    format="coreml",
                     int8=True,
-                    nms=False, # NMS handled by app or custom layer if needed, but standard yolo export usually includes it. 
-                               # Note: Original code said nms=False. Sticking to that.
-                    half=False
+                    nms=False,
+                    half=False,
                 )
-                
-                # Verify it actually quantized
-                if self._verify_quantization(Path(export_path)):
+
+                path = Path(export_path)
+                if self._verify_quantization(path, strict=True):
                     logger.info(f"   ✅ INT8 Export successful: {export_path}")
-                    return Path(export_path)
+                    return CoreMLExportResult(path=path, precision="int8")
                 else:
-                    logger.warning("   ⚠️  INT8 export succeeded but quantization verification failed.")
+                    logger.warning(
+                        "   ⚠️  INT8 export succeeded but quantization verification failed."
+                    )
                     raise RuntimeError("Quantization verification failed")
-                    
+
             except Exception as e:
                 logger.error(f"   ❌ INT8 export failed: {e}")
                 logger.info("   Falling back to FP16...")
-        
-        # Attempt 2: FP16 (Half Precision)
+
+        # ── Attempt 2: FP16 ─────────────────────
         try:
             logger.info("   Attempt 2: Exporting FP16...")
             export_path = model.export(
-                format='coreml',
+                format="coreml",
                 int8=False,
                 nms=False,
-                half=True
+                half=True,
             )
             logger.info(f"   ✅ FP16 Export successful: {export_path}")
-            return Path(export_path)
-            
+            return CoreMLExportResult(path=Path(export_path), precision="fp16")
+
         except Exception as e:
             logger.error(f"   ❌ FP16 export failed: {e}")
             logger.info("   Falling back to FP32...")
-            
-        # Attempt 3: FP32 (Full Precision)
+
+        # ── Attempt 3: FP32 ─────────────────────
         try:
             logger.info("   Attempt 3: Exporting FP32...")
             export_path = model.export(
-                format='coreml',
+                format="coreml",
                 int8=False,
                 nms=False,
-                half=False
+                half=False,
             )
             logger.info(f"   ✅ FP32 Export successful: {export_path}")
-            return Path(export_path)
-            
+            return CoreMLExportResult(path=Path(export_path), precision="fp32")
+
         except Exception as e:
             logger.critical(f"   ❌ ALL export attempts failed: {e}")
-            return None
+            return CoreMLExportResult(path=None, precision="failed")
 
-    def _verify_quantization(self, model_path: Path) -> bool:
+    # ──────────────────────────────────────────────────────
+    # Internal: Quantization verification
+    # ──────────────────────────────────────────────────────
+
+    def _verify_quantization(self, model_path: Path, strict: bool = False) -> bool:
         """
-        Verify that the model has been quantized using coremltools
+        Verify that the CoreML model contains quantized operations.
+
+        Args:
+            model_path: Path to .mlpackage.
+            strict:     If True, treat any verification error as a failure.
+                        If False, log a warning but allow the export to proceed.
         """
         try:
             mlmodel = ct.models.MLModel(str(model_path))
             spec = mlmodel.get_spec()
-            
-            # Check 1: Model Type
-            if spec.WhichOneof('Type') != 'mlProgram':
-                logger.warning(f"   ⚠️  Model type is {spec.WhichOneof('Type')}, expected mlProgram")
+
+            # Check 1: Model must be an mlProgram (not neuralNetwork)
+            model_type = spec.WhichOneof("Type")
+            if model_type != "mlProgram":
+                logger.warning(
+                    f"   ⚠️  Model type is '{model_type}', expected 'mlProgram'"
+                )
                 return False
-                
-            # Check 2: Quantized Operations
+
+            # Check 2: Count quantized vs total operations
             quantized_ops = 0
             total_ops = 0
-            
-            # Navigate the spec to find operations
-            # mlProgram structure: program -> functions -> block_specializations -> operations
-            if hasattr(spec, 'mlProgram'):
+
+            QUANT_KEYWORDS = (
+                "quant", "dequant", "lut_to_dense", "constexpr_blockwise"
+            )
+
+            if hasattr(spec, "mlProgram"):
                 for function in spec.mlProgram.functions.values():
                     for block in function.block_specializations.values():
                         for op in block.operations:
                             total_ops += 1
                             op_type = op.type.lower()
-                            # Common quantization op types or keywords
-                            if 'quant' in op_type or 'dequant' in op_type or 'lut_to_dense' in op_type:
+                            if any(kw in op_type for kw in QUANT_KEYWORDS):
                                 quantized_ops += 1
-            
-            logger.info(f"   🔎 Quantization check: {quantized_ops}/{total_ops} operations quantized")
-            
-            # If we have ops and none are quantized, that's a failure for INT8
+
+            ratio = quantized_ops / total_ops if total_ops > 0 else 0
+            logger.info(
+                f"   🔎 Quantization check: {quantized_ops}/{total_ops} ops "
+                f"({ratio:.1%}) contain quantization markers"
+            )
+
+            # No quantized ops at all — definite failure
             if total_ops > 0 and quantized_ops == 0:
                 return False
-                
-            return True
-            
-        except Exception as e:
-            logger.warning(f"   ⚠️  Could not verify quantization: {e}")
-            # If we can't verify, we don't want to fail the whole export just for that 
-            # unless we are super strict. Let's return True but log warning.
+
+            # Very low ratio — suspicious
+            if 0 < ratio < 0.05:
+                logger.warning(
+                    f"   ⚠️  Very low quantization ratio ({ratio:.1%}) — "
+                    "model may not be meaningfully quantized"
+                )
+                return not strict
+
+            # Secondary sanity check: model file size
+            if not self._check_model_size(model_path):
+                logger.warning("   ⚠️  Model size check suggests quantization may have failed")
+                return not strict
+
             return True
 
+        except Exception as e:
+            logger.error(
+                f"   ❌ Quantization verification crashed: {type(e).__name__}: {e}"
+            )
+            if strict:
+                return False
+            logger.warning(
+                "   Proceeding with unverified quantization (strict=False). "
+                "Pass strict=True to fail on verification errors."
+            )
+            return True
+
+    @staticmethod
+    def _check_model_size(
+        model_path: Path,
+        max_int8_mb: float = 5.0,
+    ) -> bool:
+        """
+        Quick sanity check: an INT8 YOLO-nano model should be well under 5 MB.
+
+        This catches cases where quantization silently produced an FP32 model.
+        """
+        total_bytes = sum(
+            f.stat().st_size for f in model_path.rglob("*") if f.is_file()
+        )
+        size_mb = total_bytes / (1024 ** 2)
+        logger.info(f"   📏 Model package size: {size_mb:.1f} MB")
+
+        if size_mb > max_int8_mb:
+            logger.warning(
+                f"   ⚠️  Model size ({size_mb:.1f} MB) exceeds expected INT8 "
+                f"ceiling ({max_int8_mb} MB). Quantization may have failed."
+            )
+            return False
+        return True
 
 ======= FILE: src/leafmd/core/trainer.py =======
-
 
 import json
 import time
@@ -4203,118 +5667,161 @@ from pathlib import Path
 from typing import Dict, Optional
 from ultralytics import YOLO
 
+from leafmd.core.environment import EnvironmentValidator
+
 logger = logging.getLogger(__name__)
 
+
 class ModelTrainer:
-    """Handles model training with MPS safety checks"""
-    
+    """Handles model training with MPS safety checks."""
+
     def __init__(
         self,
         model_name: str,
         data_yaml: Path,
         device: str,
-        config: Dict
+        config: Dict,
     ):
+        """
+        Args:
+            model_name: Architecture name (e.g. 'yolo26n').
+            data_yaml:  Path to the dataset's data.yaml.
+            device:     Training device ('mps', 'cpu', etc.).
+            config:     Dict of YOLO.train() kwargs (must NOT contain 'device').
+        """
         self.model_name = model_name
         self.data_yaml = data_yaml
         self.device = device
         self.config = config
-    
+
+        # Enforce MPS-safe workers regardless of what config says
+        safe_workers = EnvironmentValidator.get_safe_worker_count(device)
+        if self.config.get("workers", 0) != safe_workers and device == "mps":
+            logger.warning(
+                f"Overriding workers={self.config.get('workers')} → {safe_workers} "
+                f"(MPS safety)"
+            )
+            self.config["workers"] = safe_workers
+
     def train(self) -> Optional[Path]:
         """
-        Train model with safety checks
-        
+        Train model with safety checks.
+
         Returns:
-            Path to best.pt or None if training failed
+            Path to best.pt or None if training failed.
         """
-        logger.info("="*70)
+        logger.info("=" * 70)
         logger.info("MODEL TRAINING")
-        logger.info("="*70 + "\n")
-        
+        logger.info("=" * 70 + "\n")
+
         logger.info(f"🤖 Model: {self.model_name}")
         logger.info(f"📊 Dataset: {self.data_yaml}")
         logger.info(f"🎯 Device: {self.device.upper()}")
-        logger.info(f"\n⚙️  Configuration:")
+        logger.info("\n⚙️  Configuration:")
         for key, value in self.config.items():
             logger.info(f"   {key}: {value}")
-        
-        logger.info(f"\n🏋️  Training starting...")
+
+        logger.info("\n🏋️  Training starting...")
         logger.info("   This will take 15-30 minutes on M4 Max")
         logger.info("   Press Ctrl+C to stop (progress will be saved)\n")
-        
+
         start_time = time.time()
-        
+
         try:
-            if self.config.get('resume', False):
-                model_path = Path(self.config.get('project', 'runs/train')) / self.config.get('name', 'exp') / 'weights' / 'last.pt'
+            # ── Resolve model path ────────────────
+            if self.config.get("resume", False):
+                model_path = (
+                    Path(self.config.get("project", "runs/train"))
+                    / self.config.get("name", "exp")
+                    / "weights"
+                    / "last.pt"
+                )
                 if not model_path.exists():
-                    logger.error(f"❌ Resume failed: Checkpoint not found at {model_path}")
+                    logger.error(
+                        f"❌ Resume failed: Checkpoint not found at {model_path}"
+                    )
                     return None
                 logger.info(f"🔄 Resuming from checkpoint: {model_path}")
             else:
-                model_path = Path(f'{self.model_name}.pt')
+                model_path = Path(f"{self.model_name}.pt")
                 if not model_path.exists():
                     logger.error(f"❌ Model file not found: {model_path}")
                     return None
-                
+
             model = YOLO(str(model_path))
-            
-            results = model.train(
-                data=str(self.data_yaml),
-                device=self.device,
-                val=False,  # Validate on CPU separately
-                **self.config
-            )
-            
+
+            # ── Train (val disabled — we validate on CPU after) ──
+            try:
+                results = model.train(
+                    data=str(self.data_yaml),
+                    device=self.device,
+                    val=False,
+                    **self.config,
+                )
+            except AssertionError as e:
+                if "nothing to resume" in str(e).lower():
+                    logger.warning(f"\n⚠️ Training already completed to target epochs. Skipping training.")
+                else:
+                    raise e
+
             training_time = (time.time() - start_time) / 60
             logger.info(f"\n✅ Training completed in {training_time:.1f} minutes")
-            
-            # Get best model path
-            best_path = Path(self.config['project']) / self.config['name'] / 'weights' / 'best.pt'
-            
+
+            # ── Locate best.pt ────────────────────
+            best_path = (
+                Path(self.config["project"])
+                / self.config["name"]
+                / "weights"
+                / "best.pt"
+            )
             if not best_path.exists():
                 logger.error(f"❌ Best model not found at {best_path}")
                 return None
-            
-            # Validate on CPU
-            logger.info("\n🔄 Running final validation on CPU...")
+
+            # ── Validate on safe device ───────────
+            val_device = EnvironmentValidator.get_validation_device(self.device)
+            logger.info(f"\n🔄 Running final validation on {val_device.upper()}...")
             best_model = YOLO(str(best_path))
+
             try:
-                metrics = best_model.val(device='cpu', split='val')
+                metrics = best_model.val(device=val_device, split="val")
             except Exception as e:
-                logger.warning(f"⚠️ Validation on 'val' split failed: {e}. Attempting 'test' split...")
-                metrics = best_model.val(device='cpu', split='test')
-            
-            logger.info(f"\n📊 Final Metrics:")
+                logger.warning(
+                    f"⚠️ Validation on 'val' split failed: {e}. "
+                    "Attempting 'test' split..."
+                )
+                metrics = best_model.val(device=val_device, split="test")
+
+            logger.info("\n📊 Final Metrics:")
             logger.info(f"   mAP@50:     {metrics.box.map50:.4f}")
             logger.info(f"   mAP@50-95:  {metrics.box.map:.4f}")
-            logger.info(f"   Precision:  {metrics.box.p:.4f}")
-            logger.info(f"   Recall:     {metrics.box.r:.4f}")
-            
-            # Save metrics
+            logger.info(f"   Precision:  {metrics.box.p.mean():.4f}")
+            logger.info(f"   Recall:     {metrics.box.r.mean():.4f}")
+
+            # ── Save metrics ──────────────────────
             metrics_dict = {
-                'map50': float(metrics.box.map50),
-                'map50_95': float(metrics.box.map),
-                'precision': float(metrics.box.p),
-                'recall': float(metrics.box.r),
-                'training_time_minutes': training_time
+                "map50": float(metrics.box.map50),
+                "map50_95": float(metrics.box.map),
+                "precision": float(metrics.box.p.mean()),
+                "recall": float(metrics.box.r.mean()),
+                "training_time_minutes": training_time,
             }
-            
-            metrics_path = best_path.parent.parent / 'metrics.json'
-            with open(metrics_path, 'w') as f:
+
+            metrics_path = best_path.parent.parent / "metrics.json"
+            with open(metrics_path, "w") as f:
                 json.dump(metrics_dict, f, indent=2)
-            
+
             logger.info(f"\n💾 Metrics saved to: {metrics_path}")
             logger.info(f"💾 Best model saved to: {best_path.absolute()}")
-            
+
             return best_path
-            
+
         except KeyboardInterrupt:
             logger.info("\n⏸️  Training interrupted. Checkpoint saved.")
             return None
         except Exception as e:
             logger.error(f"\n❌ Training error: {e}")
             import traceback
+
             logger.error(traceback.format_exc())
             return None
-

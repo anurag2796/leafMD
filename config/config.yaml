@@ -54,7 +54,7 @@ augmentation:
 
 # Validation Configuration
 validation:
-  split: "test"  # test or val
+  split: "val"  # test or val
   device: "cpu"  # Always use CPU to avoid MPS bugs
   conf_threshold: 0.001  # Confidence threshold for NMS
   iou_threshold: 0.6  # IoU threshold for NMS
