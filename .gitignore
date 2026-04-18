@@ -42,3 +42,4 @@ models/
 *.mlpackage
 *.tflite
 pipeline.log
+context.zip
