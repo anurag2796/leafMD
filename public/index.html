@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LeafMD — Deep Learning Disease Detection</title>
+    <!-- Google Fonts for modern typography -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="background-effect"></div>
+    <div class="glass-container">
+        <header>
+            <h1>🌿 LeafMD</h1>
+            <p>Advanced Plant Disease Detection (Powered by YOLO)</p>
+            <div class="engine-toggles">
+                <label class="toggle-switch">
+                    <input type="checkbox" id="toggle-clahe">
+                    <span class="slider"></span>
+                    <span class="toggle-label">CLAHE Optics</span>
+                </label>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="toggle-tta">
+                    <span class="slider"></span>
+                    <span class="toggle-label">Test-Time Augmentation</span>
+                </label>
+            </div>
+        </header>
+
+        <main>
+            <div id="drop-zone" class="drop-zone">
+                <div class="upload-icon">⬆️</div>
+                <p>Drag & Drop a leaf image here</p>
+                <span>or</span>
+                <button class="upload-btn" onclick="document.getElementById('file-input').click()">Browse Files</button>
+                <input type="file" id="file-input" accept="image/*" hidden>
+            </div>
+
+            <div id="result-container" class="result-container hidden">
+                <div class="image-wrapper">
+                    <img id="preview-image" src="" alt="Uploaded Leaf">
+                    <canvas id="detection-canvas"></canvas>
+                </div>
+                
+                <div class="results-panel">
+                    <h2>Diagnosis Results</h2>
+                    <div id="loading-state" class="hidden">
+                        <div class="spinner"></div>
+                        <p>Analyzing botanical features...</p>
+                    </div>
+                    <ul id="detections-list">
+                        <!-- Detected items injected via JS -->
+                    </ul>
+                    <button class="reset-btn" id="reset-btn" onclick="resetUI()">Analyze Another</button>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
